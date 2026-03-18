@@ -15,8 +15,8 @@ from config import Config
 from tokenizer import Tokenizer
 from model_llama import LlamaForCausalLM
 from model_qwen import Qwen2ForCausalLM
-from dataset_reader import GPQAReader, MMLUReader, BBHReader, GSM8KReader, Reader
-from dataset_reader_cot import MMLUCOTReader, BBHCOTReader, GSM8KCOTReader, GPQACOTReader, DISTILLCOTReader
+from dataset_reader_cot import GPQACOTReader, MMLUCOTReader, BBHCOTReader, GSM8KCOTReader, DISTILLCOTReader
+from dataset_reader import Reader
 
 DEBUG:bool=False
 BLOCK:bool=False
@@ -1924,43 +1924,23 @@ def generate(
             repetition_penalty=repetition_penalty
         )
     elif comp_config.output_comp_level == 'sentence':
-        if comp_config.mtp_cfg and spec_decode:
-            # mtp register generation
-            prompt, output = _sentence_level_mtp_register_generate(
-                model=model,
-                tokenizer=tokenizer,
-                comp_config=comp_config,
-                max_new_tokens=max_new_tokens,
-                attention_config=attention_config,
-                prefill_compress=prefill_compress,
-                exclude_continue=exclude_continue,
-                attn_utils=attn_utils,
-                kv_utils=kv_utils,
-                token_utils=token_utils,
-                predicted_token_id=predicted_token_id,
-                last_hidden_state=last_hidden_state,
-                update_attention_method=update_attention_method,
-                use_EPL=use_EPL,
-                repetition_penalty=repetition_penalty
-            )
-        else:
-            prompt, output = _sentence_level_generate(
-                model=model,
-                tokenizer=tokenizer,
-                comp_config=comp_config,
-                max_new_tokens=max_new_tokens,
-                attention_config=attention_config,
-                prefill_compress=prefill_compress,
-                exclude_continue=exclude_continue,
-                attn_utils=attn_utils,
-                kv_utils=kv_utils,
-                token_utils=token_utils,
-                predicted_token_id=predicted_token_id,
-                update_attention_method=update_attention_method,
-                use_EPL=use_EPL,
-                repetition_penalty=repetition_penalty,
-            )
-            
+        prompt, output = _sentence_level_generate(
+            model=model,
+            tokenizer=tokenizer,
+            comp_config=comp_config,
+            max_new_tokens=max_new_tokens,
+            attention_config=attention_config,
+            prefill_compress=prefill_compress,
+            exclude_continue=exclude_continue,
+            attn_utils=attn_utils,
+            kv_utils=kv_utils,
+            token_utils=token_utils,
+            predicted_token_id=predicted_token_id,
+            update_attention_method=update_attention_method,
+            use_EPL=use_EPL,
+            repetition_penalty=repetition_penalty,
+        )
+        
     
     del kv_utils
     return prompt, output
@@ -2159,9 +2139,11 @@ def eval_dataset(
         for i in range(start, end):
             total += 1
             question:str = reader.get_prompt(idx=i)
-            question_list:List[str] = reader.get_prompt_list(idx=i)
+            # question_list:List[str] = reader.get_prompt_list(idx=i)
+            question_list = []
             system_prompt:str = reader.get_system_prompt()
-            system_prompt_list:List[str] = reader.get_system_prompt_list()
+            # system_prompt_list:List[str] = reader.get_system_prompt_list()
+            system_prompt_list = []
 
             start_time = time.time()
             prompt, output = generate(
@@ -2244,10 +2226,10 @@ def main():
     )
 
     all_tasks = {
-        "mmlu": MMLUReader(),
-        "gsm8k": GSM8KReader(),
-        "gpqa": GPQAReader(),
-        "bbh": BBHReader(),
+        "mmlu": MMLUCOTReader(),
+        "gsm8k": GSM8KCOTReader(),
+        "gpqa": GPQACOTReader(),
+        "bbh": BBHCOTReader(),
     }
 
     task_list = [(all_tasks[name], name) for name in args.datasets if name in all_tasks]
