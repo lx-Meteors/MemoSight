@@ -25,7 +25,7 @@ class MMLUCOTReader(Reader):
                 self.data_list.append(item)
                 
     def get_prompt(self, idx:int) -> str:
-        return "Please select the option that best answers the question. Return your final response within \\boxed{}.\nHere are the Question:\n" + self.data_list[idx]['question']
+        return "Return your final response within \\boxed{}. " + self.data_list[idx]['question']
 
     def compare_answer(self, model_answer:str, gt_answer:str, idx:int) -> Tuple[bool, str]:
         if model_answer == "error" or model_answer == "" or model_answer == None:
@@ -47,7 +47,7 @@ class MMLUCOTReader(Reader):
         return self.data_list[idx]['answer']
 
     def get_system_prompt(self) -> str:
-        return "Below is a question. Please think through it step by step, and then provide the final answer. If options are provided, please select the correct one.\n## Output format:\nUse “<THOUGHT>...</THOUGHT>” to outline your reasoning process, and enclose the final answer in ‘\\boxed{}‘.\n\n## Example 1:\nQuestion:\nWhat is 2 + 3?\nOutput:\n<THOUGHT>First, I recognize that this is a simple addition problem. Adding 2 and 3 together gives 5.</THOUGHT>\nTherefore, the final answer is \\boxed{5}.\n\n## Example 2:\nQuestion:\nWhat is 2 + 3?\nA. 4\nB. 5\nC. 10\n\nOutput:\n<THOUGHT>First, I recognize that this is a simple addition problem. Adding 2 and 3 together gives 5.</THOUGHT>\nTherefore, the final answer is \\boxed{B}."
+        return ""
 
 class BBHCOTReader(Reader):
 
@@ -90,7 +90,7 @@ class BBHCOTReader(Reader):
         return "structured" in self.data_list[idx]["meta_data"]
 
     def get_prompt(self, idx:int) -> str:
-        return "Return your final response within \\boxed{}. If options are provided, please select the correct one. " + self.data_list[idx]['question']
+        return "Return your final response within \\boxed{}. " + self.data_list[idx]['question']
 
     def compare_answer(self, model_answer:str, gt_answer:str, idx:int) -> Tuple[bool, str]:
         is_multi_choices:bool = self.is_multiple_choices_question(idx)
@@ -119,7 +119,7 @@ class BBHCOTReader(Reader):
         return self.data_list[idx]['answer']
 
     def get_system_prompt(self) -> str:
-        return "Below is a question. Please think through it step by step, and then provide the final answer. If options are provided, please select the correct one.\n## Output format:\nUse “<THOUGHT>...</THOUGHT>” to outline your reasoning process, and enclose the final answer in ‘\\boxed{}‘.\n\n## Example 1:\nQuestion:\nWhat is 2 + 3?\nOutput:\n<THOUGHT>First, I recognize that this is a simple addition problem. Adding 2 and 3 together gives 5.</THOUGHT>\nTherefore, the final answer is \\boxed{5}.\n\n## Example 2:\nQuestion:\nWhat is 2 + 3?\nA. 4\nB. 5\nC. 10\n\nOutput:\n<THOUGHT>First, I recognize that this is a simple addition problem. Adding 2 and 3 together gives 5.</THOUGHT>\nTherefore, the final answer is \\boxed{B}."
+        return ""
 
 class GSM8KCOTReader(Reader):
 
@@ -169,7 +169,7 @@ class GSM8KCOTReader(Reader):
         return self.data_list[idx]['answer']
 
     def get_system_prompt(self) -> str:
-        return "Below is a question. Please think through it step by step, and then provide the final answer. If options are provided, please select the correct one.\n## Output format:\nUse “<THOUGHT>...</THOUGHT>” to outline your reasoning process, and enclose the final answer in ‘\\boxed{}‘.\n\n## Example 1:\nQuestion:\nWhat is 2 + 3?\nOutput:\n<THOUGHT>First, I recognize that this is a simple addition problem. Adding 2 and 3 together gives 5.</THOUGHT>\nTherefore, the final answer is \\boxed{5}.\n\n## Example 2:\nQuestion:\nWhat is 2 + 3?\nA. 4\nB. 5\nC. 10\n\nOutput:\n<THOUGHT>First, I recognize that this is a simple addition problem. Adding 2 and 3 together gives 5.</THOUGHT>\nTherefore, the final answer is \\boxed{B}."
+        return ""
 
 class GPQACOTReader(Reader):
     
@@ -199,7 +199,7 @@ class GPQACOTReader(Reader):
                 self.data_list.append(item)
 
     def get_prompt(self, idx:int) -> str:
-        return "Given a question, please select the option that best answers it. Return your final response within \\boxed{}. " + self.data_list[idx]['question']
+        return "Return your final response within \\boxed{}. " + self.data_list[idx]['question']
 
     def compare_answer(self, model_answer:str, gt_answer:str, idx:int) -> Tuple[bool, str]:
         if model_answer == "error":
@@ -221,55 +221,5 @@ class GPQACOTReader(Reader):
         return str(self.data_list[idx]['answer'])
 
     def get_system_prompt(self) -> str:
-        return "Below is a question. Please think through it step by step, and then provide the final answer. If options are provided, please select the correct one.\n## Output format:\nUse “<THOUGHT>...</THOUGHT>” to outline your reasoning process, and enclose the final answer in ‘\\boxed{}‘.\n\n## Example 1:\nQuestion:\nWhat is 2 + 3?\nOutput:\n<THOUGHT>First, I recognize that this is a simple addition problem. Adding 2 and 3 together gives 5.</THOUGHT>\nTherefore, the final answer is \\boxed{5}.\n\n## Example 2:\nQuestion:\nWhat is 2 + 3?\nA. 4\nB. 5\nC. 10\n\nOutput:\n<THOUGHT>First, I recognize that this is a simple addition problem. Adding 2 and 3 together gives 5.</THOUGHT>\nTherefore, the final answer is \\boxed{B}."
-
-
-class DISTILLCOTReader(Reader):
-
-    file_path = DATASET_PATH['distill']
-
-    def __init__(self):
-        """
-        {
-            "math": [
-                {
-                    "meta_data": {
-                        "question": "",
-                        "answer": ""
-                    },
-                    "question": "",
-                    "answer": "",
-                }
-            ]
-        }
-        """
-        self.meta_db = read_json(DISTILLCOTReader.file_path)
-        self.data_list:List = list()
-        for key in self.meta_db:
-            for item in self.meta_db[key]:
-                self.data_list.append(item)
-
-    def get_prompt(self, idx:int) -> str:
-        return "Return your final response within \\boxed{}. " + self.data_list[idx]['question']
-
-    def compare_answer(self, model_answer:str, gt_answer:str, idx:int) -> bool:
-        if model_answer == "error":
-            left_part = model_answer
-            right_part = gt_answer
-            return False,  f"`{left_part}` <=> `{right_part}`"
-        else:
-            match = re.findall(r'\\boxed{(.*?)}', model_answer)
-            if match:
-                left_part = match[-1].strip().lower()
-            else:
-                left_part = model_answer.strip().lower()
-            right_part = gt_answer.strip().lower()
-            left_part = left_part.replace(",", "")
-            right_part = right_part.replace(",", "")
-            return left_part == right_part, f"`{left_part}` <=> `{right_part}`"
+        return ""
         
-    def get_answer(self, idx: int) -> str:
-        return self.data_list[idx]['answer']
-
-    def get_system_prompt(self) -> str:
-        return "Below is a question. Please think through it step by step, and then provide the final answer. If options are provided, please select the correct one.\n## Output format:\nUse “<THOUGHT>...</THOUGHT>” to outline your reasoning process, and enclose the final answer in ‘\\boxed{}‘.\n\n## Example 1:\nQuestion:\nWhat is 2 + 3?\nOutput:\n<THOUGHT>First, I recognize that this is a simple addition problem. Adding 2 and 3 together gives 5.</THOUGHT>\nTherefore, the final answer is \\boxed{5}.\n\n## Example 2:\nQuestion:\nWhat is 2 + 3?\nA. 4\nB. 5\nC. 10\n\nOutput:\n<THOUGHT>First, I recognize that this is a simple addition problem. Adding 2 and 3 together gives 5.</THOUGHT>\nTherefore, the final answer is \\boxed{B}."

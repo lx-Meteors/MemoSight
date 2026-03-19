@@ -21,7 +21,7 @@ class Tokenizer:
         self.change_rope:bool = change_rope
         self.tokenizer:AutoTokenizer = AutoTokenizer.from_pretrained(
             tokenizer_path,
-            add_prefix_space=add_prefix_space,
+            # add_prefix_space=add_prefix_space,
             mean_resizing=False
         )
         if special_token_list != None:

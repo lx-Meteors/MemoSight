@@ -15,7 +15,7 @@ from config import Config
 from tokenizer import Tokenizer
 from model_llama import LlamaForCausalLM
 from model_qwen import Qwen2ForCausalLM
-from dataset_reader_cot import GPQACOTReader, MMLUCOTReader, BBHCOTReader, GSM8KCOTReader, DISTILLCOTReader
+from dataset_reader_cot import GPQACOTReader, MMLUCOTReader, BBHCOTReader, GSM8KCOTReader
 from dataset_reader import Reader
 
 DEBUG:bool=False
