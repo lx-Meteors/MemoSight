@@ -3,8 +3,8 @@
         "model": "qwen",
         "prefix": "",
         "middle": "<｜User｜>",
-        "suffix": "<｜Assistant｜>",
-        "complete": "{system}<｜User｜>{question}<｜Assistant｜>"
+        "suffix": "<｜Assistant｜><think>",
+        "complete": "{system}<｜User｜>{question}<｜Assistant｜><think>"
     },
     "prompt": {
         "save_template": true,

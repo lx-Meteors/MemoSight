@@ -47,7 +47,7 @@ class MMLUCOTReader(Reader):
         return self.data_list[idx]['answer']
 
     def get_system_prompt(self) -> str:
-        return ""
+        return "You are a helpful assistant."
 
 class BBHCOTReader(Reader):
 
@@ -119,7 +119,7 @@ class BBHCOTReader(Reader):
         return self.data_list[idx]['answer']
 
     def get_system_prompt(self) -> str:
-        return ""
+        return "You are a helpful assistant."
 
 class GSM8KCOTReader(Reader):
 
@@ -169,7 +169,7 @@ class GSM8KCOTReader(Reader):
         return self.data_list[idx]['answer']
 
     def get_system_prompt(self) -> str:
-        return ""
+        return "You are a helpful assistant."
 
 class GPQACOTReader(Reader):
     
@@ -221,5 +221,5 @@ class GPQACOTReader(Reader):
         return str(self.data_list[idx]['answer'])
 
     def get_system_prompt(self) -> str:
-        return ""
+        return "You are a helpful assistant."
         

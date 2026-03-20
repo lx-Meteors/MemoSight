@@ -2012,11 +2012,11 @@ def get_model_and_tokenizer(
         add_prefix_space=False,
     )
 
-    for token in comp_config.special_token_name_list:
-        if tokenizer.convert_tokens_to_ids(token) == None:
-            special_token_list.append(token)
-    if len(special_token_list) > 0:
-        tokenizer.add_special_token(special_token_list)
+    # for token in comp_config.special_token_name_list:
+    #     if tokenizer.convert_tokens_to_ids(token) == None:
+    #         special_token_list.append(token)
+    # if len(special_token_list) > 0:
+    #     tokenizer.add_special_token(special_token_list)
 
     if args.model_type.lower() == 'qwen':
         model = Qwen2ForCausalLM.from_pretrained(

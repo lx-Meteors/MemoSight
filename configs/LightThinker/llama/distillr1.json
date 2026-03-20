@@ -2,9 +2,9 @@
     "template": {
         "model": "qwen",
         "prefix": "",
-        "middle": "<｜begin▁of▁sentence｜><｜User｜>",
-        "suffix": "<｜Assistant｜>",
-        "complete": "{system}<｜begin▁of▁sentence｜><｜User｜>{question}<｜Assistant｜>"
+        "middle": "<｜User｜>",
+        "suffix": "<｜Assistant｜><think>",
+        "complete": "{system}<｜User｜>{question}<｜Assistant｜><think>"
     },
     "prompt": {
         "save_template": true,
