@@ -7,11 +7,11 @@ ROOT_DIR="/mnt/zhaorunsong/lx/mem-co-t"
 INFERENCE_ROOT_DIR="${ROOT_DIR}/LightThinker"  # 推理脚本使用的代码根目录
 
 # 输出路径配置
-OUTPUT_BASE_DIR="/mnt/zhaorunsong/lx/rrcot_test_llama"  # 所有输出（训练、推理）的基础目录
+OUTPUT_BASE_DIR="/mnt/zhaorunsong/lx/rrcot_test"  # 所有输出（训练、推理）的基础目录
 
 # 模型和Tokenizer路径配置
-TOKENIZER_PATH="/mnt/zhaorunsong/models/Qwen2.5-0.5B-Instruct"  # Tokenizer路径
-MODEL_PATH="/mnt/zhaorunsong/models/Qwen2.5-0.5B-Instruct"  # 预训练模型路径
+TOKENIZER_PATH="/mnt/zhaorunsong/models/meta-llama/Llama-3.2-1B-Instruct"  # Tokenizer路径
+MODEL_PATH="/mnt/zhaorunsong/models/meta-llama/Llama-3.2-1B-Instruct"  # 预训练模型路径
 
 # 训练数据路径配置
 TRAIN_DATA_PATH="/mnt/zhaorunsong/lx/RRcot/data/train/train_test.jsonl"  # 训练数据路径
@@ -47,7 +47,7 @@ train_model() {
     local mode=$4
     local aux_config=$5
     local conf_version=$6
-    
+
     echo "=======🚀 ${model_tag}开始训练 ======="
     bash ${TRAIN_SCRIPT} "${ROOT_DIR}" "${model_tag}" "${use_EPL}" "${lr}" "${mode}" "${aux_config}" "${OUTPUT_BASE_DIR}" "${TOKENIZER_PATH}" "${MODEL_PATH}" "${TRAIN_DATA_PATH}" "${conf_version}"
     if [ $? -ne 0 ]; then
@@ -128,12 +128,12 @@ inference_and_evaluate() {
 
 
 ==================== 模型: epl_apa_mtp_w3e-1 ====================
-train_model "vanilla" "False" "1e-5" "normal" "None" "v1" "4096"
+train_model "vanilla" "False" "1e-5" "normal" "None" "v1"
 if [ $? -ne 0 ]; then
     echo "❌ epl_apa_mtp_w3e-1训练失败，退出"
     exit 1
 fi
-inference_and_evaluate "vanilla" "normal" "inference" "./configs/LightThinker/qwen/v1.json"
+inference_and_evaluate "vanilla" "normal" "inference" "./configs/LightThinker/llama/v1.json"
 
 
 echo ""
