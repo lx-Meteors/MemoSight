@@ -34,7 +34,7 @@ tokenizer_path="$8"
 model_path="$9"
 train_data_path="${10}"
 conf_version="${11}"
-max_length="4096"
+max_length="1024"
 
 # 检查必需参数是否为空
 if [ -z "$root_dir" ] || [ -z "$init_tag" ] || [ -z "$use_EPL" ] || [ -z "$lr" ] || [ -z "$mode" ] || [ -z "$output_base_dir" ] || [ -z "$tokenizer_path" ] || [ -z "$model_path" ] || [ -z "$train_data_path" ]; then
@@ -85,10 +85,10 @@ latest_log="${output_dir}/train_latest.log"
 
 export PYTHONPATH=$PYTHONPATH:$(pwd)
 # model 
-model_type="qwen"
+model_type="llama"
 # tokenizer_path, model_path, train_data_path 从命令行参数传入
-bos_token="<|im_start|>"
-eos_token="<|im_end|>"
+bos_token="<|begin_of_text|>"
+eos_token="<|eot_id|>"
 # conf_version="v1"
 
 # training
@@ -163,7 +163,7 @@ echo "warmup_steps=${warmup_steps}"
 compress_config="$root_dir/configs/LightThinker/${model_type}/${conf_version}.json"
 
 # 使用 tee 命令同时输出到终端和日志文件
-deepspeed --include localhost:0,1,2,3,4,5,6,7 LightThinker/train.py \
+deepspeed --include localhost:4,5,6,7 --master_port 12345 LightThinker/train.py \
     --model_type $model_type \
     --model_path $model_path \
     --tokenizer_path $tokenizer_path \

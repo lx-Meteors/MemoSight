@@ -7,7 +7,7 @@ ROOT_DIR="/mnt/zhaorunsong/lx/mem-co-t"
 INFERENCE_ROOT_DIR="${ROOT_DIR}/LightThinker"  # 推理脚本使用的代码根目录
 
 # 输出路径配置
-OUTPUT_BASE_DIR="/mnt/zhaorunsong/lx/rrcot_test"  # 所有输出（训练、推理）的基础目录
+OUTPUT_BASE_DIR="/mnt/zhaorunsong/lx/rrcot_test_llama"  # 所有输出（训练、推理）的基础目录
 
 # 模型和Tokenizer路径配置
 TOKENIZER_PATH="/mnt/zhaorunsong/models/meta-llama/Llama-3.2-1B-Instruct"  # Tokenizer路径
@@ -133,7 +133,7 @@ if [ $? -ne 0 ]; then
     echo "❌ epl_apa_mtp_w3e-1训练失败，退出"
     exit 1
 fi
-inference_and_evaluate "vanilla" "normal" "inference" "./configs/LightThinker/llama/v1.json"
+# inference_and_evaluate "vanilla" "normal" "inference" "./configs/LightThinker/llama/v1.json"
 
 
 echo ""

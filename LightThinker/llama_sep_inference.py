@@ -600,8 +600,8 @@ class KVUtils:
             cache_size=1024,
             # separator_token_ids=[13, 11, 30, 0, 26, 25, 220, 197, 198],
             # PADDING_ID=151643,
-            model_type="llama",
-            layer_num=28,
+            model_type='llama',
+            layer_num=32,
             APPLY_PES_INSIDE=False,
         )
 
@@ -840,20 +840,10 @@ def _prefill_wo_prompt_compression(
     )['input_ids']
     token_utils.show_prompt_input_ids.extend(input_ids)
     token_utils.set_input_ids(input_ids)
-
-    # Llama._update_causal_mask 期望 [bs, seq] 的 attention_mask
-    attention_mask: torch.Tensor = torch.ones(
-        (1, len(input_ids)), dtype=torch.bool, device="cuda"
-    )
-
     if DEBUG:
-        debug_attention_mask: torch.Tensor = attn_utils.create_prompt_attention(
-            length=len(input_ids),
-            indicator_list=[],
-        )
         DebugUtils.show_global_attention(
             tokenizer=tokenizer,
-            attention_mask=debug_attention_mask.squeeze().cpu().tolist(), 
+            attention_mask=attention_mask.squeeze().cpu().tolist(), 
             input_ids=input_ids,
             position_ids=token_utils.get_position_ids().squeeze().cpu().tolist(),
             block=BLOCK,
@@ -869,7 +859,7 @@ def _prefill_wo_prompt_compression(
         cache_size=1024,
         # separator_token_ids=[13, 11, 30, 0, 26, 25, 220, 197, 198],
         # PADDING_ID=tokenizer.pad_token_id,
-        model_type="llama",
+        model_type='llama',
         layer_num=model.config.num_hidden_layers,
         APPLY_PES_INSIDE=False,
     )
@@ -878,7 +868,6 @@ def _prefill_wo_prompt_compression(
         input_ids=torch.as_tensor(
             [input_ids], device="cuda"
         ),
-        attention_mask=attention_mask,
         use_cache=True,
         past_key_values=past_key_values,
         return_dict=True,
@@ -2380,8 +2369,6 @@ def get_parser():
     parser.add_argument('--output_tag', type=str)
     parser.add_argument('--model_type', type=str, choices=['qwen', 'llama'])
     parser.add_argument('--model_path', type=str, default=None)
-    parser.add_argument('--attn_implementation', type=str, default='sdpa', choices=['flash_attention_2', 'sdpa', 'eager'])
-    parser.add_argument('--sepllm_config', type=str, default='/mnt/zhaorunsong/lx/mem-co-t/configs/sepllm_llama.yml')
 
     parser.add_argument('--bos_token', type=str)
     parser.add_argument('--eos_token', type=str)
@@ -2448,25 +2435,9 @@ def get_model_and_tokenizer(
             model_path, torch_dtype=torch.bfloat16, device_map="auto"
         )
     elif args.model_type.lower() == 'llama':
-        llama_kwargs = dict(
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-            attn_implementation=args.attn_implementation,
+        model = LlamaForCausalLM.from_pretrained(
+            model_path, torch_dtype=torch.bfloat16, device_map="auto"
         )
-        if args.attn_implementation != 'flash_attention_2':
-            llama_kwargs['sepllm_config'] = args.sepllm_config
-        model = LlamaForCausalLM.from_pretrained(model_path, **llama_kwargs)
-
-    tokenizer_vocab_size = len(tokenizer.tokenizer)
-    model_vocab_size = model.get_input_embeddings().weight.shape[0]
-    if tokenizer_vocab_size != model_vocab_size:
-        print(f"Resize token embeddings: {model_vocab_size} -> {tokenizer_vocab_size}")
-        model.resize_token_embeddings(tokenizer_vocab_size)
-
-    print(
-        f"Model attn_implementation={args.attn_implementation}; "
-        f"SepLLM mode={'SepCache' if args.attn_implementation == 'flash_attention_2' else 'mask-based'}"
-    )
 
     comp_config.convert2id(tokenizer)
     
