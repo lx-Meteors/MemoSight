@@ -342,12 +342,26 @@ run_infer() {
 run_eval() {
     require_non_empty "--tokenizer_path" "${TOKENIZER_PATH}"
     local eval_py="${ROOT_DIR}/evaluation/eval_file.py"
+    local eval_init_py="${ROOT_DIR}/evaluation/init.py"
     require_file "${eval_py}"
 
     local infer_base="${EXP_ROOT}/inference"
     local ds_arr=()
     csv_to_array "${DATASETS}" ds_arr
     [[ "${#ds_arr[@]}" -gt 0 ]] || die "--datasets 不能为空"
+
+    local missing_reference="false"
+    for ds in "${ds_arr[@]}"; do
+        if [[ ! -f "${ROOT_DIR}/data/eval/${ds}.jsonl" ]]; then
+            missing_reference="true"
+            break
+        fi
+    done
+    if [[ "${missing_reference}" == "true" ]]; then
+        require_file "${eval_init_py}"
+        log "评估 reference JSONL 不存在，正在从 data/eval/*.json 自动生成..."
+        python "${eval_init_py}"
+    fi
 
     local comp_cfg
     comp_cfg="$(to_abs_path "${COMP_CONFIG}")"
@@ -562,53 +576,32 @@ esac
 log "执行完成: ${STAGE}"
 
 
-# # 运行示例 train
-# bash /mnt/lxy/RRcot/scripts/pipeline.sh \
-#   --stage train \
-#   --exp_tag vanilla_qwen \
-#   --output_base_dir /mnt/lxy/RRcot/experiments \
+# ========== Qwen3-8B 运行示例 ==========
+# 在仓库根目录执行下面的命令，完成 train -> infer -> eval 全流程。
+# 运行前只需将 /path/to/train.jsonl 替换为真实的训练数据路径。
+# 如果 Qwen3-8B 已下载到本地，可将 Qwen/Qwen3-8B 替换为本地 checkpoint 路径。
+#
+# bash scripts/pipeline.sh \
+#   --stage all \
+#   --exp_tag qwen3_8b_lightthinker \
+#   --output_base_dir ./experiments \
+#   --model_type qwen \
+#   --tokenizer_path Qwen/Qwen3-8B \
+#   --train_model_path Qwen/Qwen3-8B \
+#   --train_data_path /path/to/train.jsonl \
 #   --use_epl false \
-#   --lr 1e-5 \
 #   --mode normal \
-#   --model_type qwen \
-#   --tokenizer_path /mnt/lxy/hf_models/Qwen2.5-1.5B-Instruct \
-#   --train_model_path /mnt/lxy/hf_models/DeepSeek-R1-Distill-Qwen-1.5B \
-#   --train_data_path /mnt/lxy/RRcot/data/train/train_debug.jsonl \
-#   --train_gpus 0,1,2,3
-
-# # 运行示例 all
-# bash /mnt/lxy/MemoSight/scripts/pipeline.sh \
-#   --stage train \
-#   --exp_tag qwen3_epl_mtp_debug \
-#   --output_base_dir /mnt/lxy/MemoSight_ckpt \
-#   --use_epl true \
-#   --lr 2e-5 \
-#   --mode aug-wo-pc-apa-mtp \
-#   --model_type qwen \
-#   --tokenizer_path /mnt/lxy/hf_models/Qwen2.5-0.5B-Instruct \
-#   --train_model_path /mnt/lxy/hf_models/Qwen2.5-0.5B-Instruct \
-#   --train_data_path /mnt/lxy/RRcot/data/train/train_debug.jsonl \
-#   --train_gpus 0,1,2,3,4,5,6,7 \
-#   --target_gpus 0,1,2,3,4,5,6,7 \
+#   --lr 1e-5 \
+#   --conf_version v1 \
+#   --comp_config configs/LightThinker/qwen/v1.json \
+#   --max_length 4096 \
+#   --epochs 5 \
+#   --save_steps 100 \
 #   --micro_batch_size 1 \
 #   --gradient_accumulation_steps 8 \
+#   --train_gpus 0,1,2,3,4,5,6,7 \
+#   --target_gpus 0,1,2,3,4,5,6,7 \
 #   --process_per_gpu 1 \
-#   --comp_config "adaptive_mtp_v1" \
-#   --conf_version "adaptive_mtp_v1" \
-#   --max_length 4096 \
-#   --spec_decode True \
+#   --max_new_tokens 10240 \
+#   --spec_decode false \
 #   --datasets mmlu,gsm8k,gpqa,bbh
-
-
-# # 运行示例 infer
-# bash /mnt/lxy/RRcot/scripts/pipeline.sh \
-#   --stage infer \
-#   --infer_model_path /mnt/zhaorunsong/lx/rrcot_test/epl_apa_mtp_w3e-1/train/checkpoint-245 \
-#   --output_base_dir /mnt/lxy/RRcot/experiments/debug_infer_spec_decode \
-#   --use_epl false \
-#   --spec_decode true \
-#   --model_type qwen \
-#   --tokenizer_path /mnt/lxy/hf_models/DeepSeek-R1-Distill-Qwen-1.5B \
-#   --target_gpus 0 \
-#   --process_per_gpu 1 \
-#   --datasets mmlu

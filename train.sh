@@ -1,7 +1,7 @@
 # model 
 model_type="qwen"
-tokenizer_path="/mnt/jinbo/RLRM/model/Qwen/Qwen2.5-7B-Instruct" #0.5B
-model_path="/mnt/jinbo/RLRM/model/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" #1
+tokenizer_path="Qwen/Qwen3-8B"
+model_path="Qwen/Qwen3-8B"
 bos_token="<|im_start|>"
 eos_token="<|im_end|>"
 conf_version="v1"
@@ -22,7 +22,7 @@ mode="normal"
 warmup_steps=0
 
 # others
-model_size="1.5b_model_7b_tokenzier_normal"
+model_size="qwen3_8b"
 init_tag=""
 train_path="./data/train/train.jsonl"
 see_current="false"

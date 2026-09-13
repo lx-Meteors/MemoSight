@@ -54,6 +54,9 @@ cd data && unzip data.zip && cd ..
 
 We recommend the unified entry script [`scripts/pipeline.sh`](scripts/pipeline.sh) for training, inference, and evaluation instead of chaining commands manually.
 
+The main Qwen path now targets Qwen3. When using `--model_type qwen`, load the model and tokenizer
+from the same Qwen3 checkpoint (for example, `Qwen/Qwen3-8B`); Qwen2/Qwen2.5 tokenizers are rejected.
+
 Show help:
 
 ```bash
@@ -99,7 +102,7 @@ bash scripts/pipeline.sh -h
 
 ### Examples
 
-Replace `OUTPUT_DIR`, `TOKENIZER_PATH`, `MODEL_PATH`, and `TRAIN_DATA` with paths on your machine.
+Replace `OUTPUT_DIR` and `TRAIN_DATA` with paths on your machine. The examples use `Qwen/Qwen3-8B` directly.
 
 **Training only**
 
@@ -112,8 +115,8 @@ bash scripts/pipeline.sh \
   --lr 1e-5 \
   --mode normal \
   --model_type qwen \
-  --tokenizer_path TOKENIZER_PATH \
-  --model_path MODEL_PATH \
+  --tokenizer_path Qwen/Qwen3-8B \
+  --model_path Qwen/Qwen3-8B \
   --train_data_path TRAIN_DATA \
   --train_gpus 0,1,2,3
 ```
@@ -127,7 +130,7 @@ bash scripts/pipeline.sh \
   --output_base_dir OUTPUT_DIR \
   --use_epl false \
   --model_type qwen \
-  --tokenizer_path TOKENIZER_PATH \
+  --tokenizer_path Qwen/Qwen3-8B \
   --target_gpus 0,1,2,3 \
   --process_per_gpu 1 \
   --datasets mmlu,gsm8k,gpqa,bbh
@@ -144,8 +147,8 @@ bash scripts/pipeline.sh \
   --lr 1e-5 \
   --mode normal \
   --model_type qwen \
-  --tokenizer_path TOKENIZER_PATH \
-  --model_path MODEL_PATH \
+  --tokenizer_path Qwen/Qwen3-8B \
+  --model_path Qwen/Qwen3-8B \
   --train_data_path TRAIN_DATA \
   --train_gpus 0,1,2,3 \
   --target_gpus 0,1,2,3 \

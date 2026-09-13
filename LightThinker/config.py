@@ -126,7 +126,7 @@ class Config:
             self.register_token_desp
         ]
 
-        # 为qwen2.5
+        # 为 Qwen3
         if self.template_cfg['model'] == 'qwen':
             self.bos_token = "<|im_start|>"
             self.bos_token_desp = "<|im_start|>"

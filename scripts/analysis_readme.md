@@ -47,7 +47,7 @@ command. Edit the 5 lines in the **CONFIG** block at the top of the script, then
 ```bash
 # top of scripts/run_mtp_acceptance.sh
 CKPT_PATH="/path/to/your/train_output/checkpoint-xxxx"   # MTP-trained checkpoint dir
-TOKENIZER_PATH="/path/to/Qwen2.5-0.5B-Instruct"          # tokenizer dir
+TOKENIZER_PATH="/path/to/Qwen3-8B"          # tokenizer dir
 COMPRESS_CONFIG="./configs/LightThinker/qwen/adaptive_mtp_v1.json"  # config WITH an `mtp` block
 DRAFT_LENS="1 2"      # speculative register tokens/step; used as-is, keep <= training max_offset
 DATASETS="gsm8k"      # space-separated: gsm8k mmlu bbh gpqa
@@ -145,7 +145,7 @@ is GPU-synchronized so the attribution is real).
 
 ```bash
 CKPT_PATH=/path/to/your/ckpt \
-TOKENIZER_PATH=/path/to/Qwen2.5-0.5B-Instruct \
+TOKENIZER_PATH=/path/to/Qwen3-8B \
 COMPRESS_CONFIG=./configs/LightThinker/qwen/adaptive_mtp_v1.json \
 DRAFT_LEN=2 DATASETS="gsm8k" GPU=0 \
 bash scripts/run_runtime_breakdown.sh

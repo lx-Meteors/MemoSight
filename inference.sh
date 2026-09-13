@@ -2,25 +2,25 @@
 
 # `model_tag` is the filename under the output/ folder, 
 # corresponding to line 1461 of the code in LightThinker/inference.py.
-model_tag="cosine1.5b-qwen-len_4096-see_cur_false-bi_false-diag_false-mode_aug-wo-pc-prefill_compress_false-hybrid_false-epoch_5-lr_2e-5-bsz_1-accumu_4-warm_r_0.05-warm_s_0-freeze_model_false-train_input_false-qkv_no-ex_con_false"
+model_tag="qwen3_8b"
 
 # `model_short_tag` is used to save file, 
 # corresponding to line 1691 of the code in LightThinker/inference.py.
-model_short_tag="inf_qwen2.5_0.5b_tok_0.5b"
+model_short_tag="inf_qwen3_8b"
 
 model_type="qwen"
-tokenizer_path="/mnt/jinbo/RLRM/model/Qwen/Qwen2.5-0.5B-Instruct"
+tokenizer_path="Qwen/Qwen3-8B"
 bos_token="<|im_start|>"
 eos_token="<|im_end|>"
 compress_config="./configs/LightThinker/qwen/v1.json"
 
 ckpt=5220
-output_tag="1.5_wo_pretrain"
+output_tag="qwen3_8b"
 # `model_path` is an optional argument
 # if you set the `model_path`, the arguments `ckpt` and `model_tag` will be ignored.
 # see line 1460 of the code in LightThinker/inference.py for more details.
 # model_path="/mnt/jinbo/RLRM/lightthinker/output/cosine1.5b-qwen-len_4096-see_cur_false-bi_false-diag_false-mode_aug-wo-pc-prefill_compress_false-hybrid_false-epoch_5-lr_2e-5-bsz_1-accumu_4-warm_r_0.05-warm_s_0-freeze_model_false-train_input_false-qkv_no-ex_con_false/checkpoint-5220"
-model_path="/mnt/jinbo/RLRM/model/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+model_path="Qwen/Qwen3-8B"
 max_new_tokens=10240
 
 root_dir="./LightThinker"
@@ -154,4 +154,3 @@ CUDA_VISIBLE_DEVICES=4 nohup python "${root_dir}/inference.py" \
     --split_size $split_size \
     --model_path $model_path \
     --index $index > "ours_infer_log/${rolling_rope}_${compress_prompt}/${index}${prefix}_${model_short_tag}_${ckpt}.txt" 2>&1 &
-

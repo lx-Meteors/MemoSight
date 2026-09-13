@@ -39,7 +39,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from matplotlib import ticker
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 from transformers.cache_utils import Cache, DynamicCache
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -99,9 +99,19 @@ def load_model_and_tokenizer(args: argparse.Namespace):
     tokenizer = AutoTokenizer.from_pretrained(tok_path, trust_remote_code=True)
     dtype = torch.bfloat16
     if args.model_type.lower() == "qwen":
-        from LightThinker.model_qwen import Qwen2ForCausalLM
+        from LightThinker.model_qwen import Qwen3ForCausalLM
 
-        model = Qwen2ForCausalLM.from_pretrained(model_path, torch_dtype=dtype, device_map="auto")
+        config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        if config.model_type != "qwen3":
+            raise ValueError(
+                f"Expected a Qwen3 checkpoint, but `{model_path}` has model_type={config.model_type!r}."
+            )
+        missing_tokens = [token for token in ("<think>", "</think>") if token not in tokenizer.get_vocab()]
+        if missing_tokens:
+            raise ValueError(f"The tokenizer is not from Qwen3; missing native tokens: {missing_tokens}.")
+        model = Qwen3ForCausalLM.from_pretrained(
+            model_path, config=config, torch_dtype=dtype, device_map="auto"
+        )
     elif args.model_type.lower() == "llama":
         from LightThinker.model_llama import LlamaForCausalLM
 

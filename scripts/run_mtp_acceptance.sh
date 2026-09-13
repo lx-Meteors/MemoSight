@@ -18,7 +18,7 @@ export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 # CONFIG — edit these 5 lines, then run.  (all overridable via env vars)
 # ============================================================================
 CKPT_PATH="${CKPT_PATH:-/path/to/your/train_output/checkpoint-xxxx}"   # MTP-trained checkpoint dir
-TOKENIZER_PATH="${TOKENIZER_PATH:-/path/to/Qwen2.5-0.5B-Instruct}"     # tokenizer dir
+TOKENIZER_PATH="${TOKENIZER_PATH:-/path/to/Qwen3-8B}"     # tokenizer dir
 COMPRESS_CONFIG="${COMPRESS_CONFIG:-./configs/LightThinker/qwen/adaptive_mtp_v1.json}"  # config WITH an `mtp` block
 DRAFT_LENS="${DRAFT_LENS:-1 2}"   # speculative register tokens/step to sweep; keep <= training max_offset (used as-is)
 DATASETS="${DATASETS:-gsm8k}"     # space-separated: gsm8k mmlu bbh gpqa

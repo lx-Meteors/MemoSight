@@ -6,7 +6,7 @@ from config import Config
 from inference import get_model_and_tokenizer, generate as oracle_generate, AttentionUtils, TokenUtils
 from inference_batched import batched_generate
 
-MODEL_PATH = "/mnt/lxy/hf_models/Qwen2.5-0.5B-Instruct"
+MODEL_PATH = "/mnt/lxy/hf_models/Qwen3-0.6B"
 CONFIG = "/mnt/lxy/MemoSight/configs/LightThinker/qwen/v1.json"
 MAX_NEW = 48
 MAX_PROMPT = 256

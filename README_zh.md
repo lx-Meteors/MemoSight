@@ -64,6 +64,9 @@ cd data && unzip data.zip && cd ..
 
 推荐使用统一入口脚本 `[scripts/pipeline.sh](scripts/pipeline.sh)` 完成训练、推理与评估，避免手动拼接多段命令。
 
+Qwen 主流程现在对应 Qwen3。使用 `--model_type qwen` 时，模型和 tokenizer 都应来自同一个
+Qwen3 checkpoint（例如 `Qwen/Qwen3-8B`），不能再搭配 Qwen2/Qwen2.5 tokenizer。
+
 查看帮助：
 
 ```bash
@@ -119,7 +122,7 @@ bash scripts/pipeline.sh -h
 
 ### 示例
 
-请将 `OUTPUT_DIR`、`TOKENIZER_PATH`、`MODEL_PATH`、`TRAIN_DATA` 替换为本机路径。
+请将 `OUTPUT_DIR` 和 `TRAIN_DATA` 替换为本机路径；以下示例直接使用 `Qwen/Qwen3-8B`。
 
 **仅训练**
 
@@ -132,8 +135,8 @@ bash scripts/pipeline.sh \
   --lr 1e-5 \
   --mode normal \
   --model_type qwen \
-  --tokenizer_path TOKENIZER_PATH \
-  --model_path MODEL_PATH \
+  --tokenizer_path Qwen/Qwen3-8B \
+  --model_path Qwen/Qwen3-8B \
   --train_data_path TRAIN_DATA \
   --train_gpus 0,1,2,3
 ```
@@ -147,7 +150,7 @@ bash scripts/pipeline.sh \
   --output_base_dir OUTPUT_DIR \
   --use_epl false \
   --model_type qwen \
-  --tokenizer_path TOKENIZER_PATH \
+  --tokenizer_path Qwen/Qwen3-8B \
   --target_gpus 0,1,2,3 \
   --process_per_gpu 1 \
   --datasets mmlu,gsm8k,gpqa,bbh
@@ -164,8 +167,8 @@ bash scripts/pipeline.sh \
   --lr 1e-5 \
   --mode normal \
   --model_type qwen \
-  --tokenizer_path TOKENIZER_PATH \
-  --model_path MODEL_PATH \
+  --tokenizer_path Qwen/Qwen3-8B \
+  --model_path Qwen/Qwen3-8B \
   --train_data_path TRAIN_DATA \
   --train_gpus 0,1,2,3 \
   --target_gpus 0,1,2,3 \

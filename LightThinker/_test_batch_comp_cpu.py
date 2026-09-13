@@ -9,11 +9,11 @@ can't reach with an untrained model.
 import sys, torch
 sys.path.insert(0, '.')
 from config import Config
-from model_qwen import Qwen2ForCausalLM
+from model_qwen import Qwen3ForCausalLM
 from tokenizer import Tokenizer
 from inference_batched import batched_generate
 
-MODEL_PATH = "/mnt/lxy/hf_models/Qwen2.5-0.5B-Instruct"
+MODEL_PATH = "/mnt/lxy/hf_models/Qwen3-0.6B"
 CONFIG = "/mnt/lxy/MemoSight/configs/LightThinker/qwen/v1.json"
 MAX_NEW = 30
 DEVICE, DTYPE = "cpu", torch.float32
@@ -24,7 +24,7 @@ tokenizer = Tokenizer(tokenizer_path=MODEL_PATH, bos_token="<|im_start|>", eos_t
 special = [t for t in comp_config.special_token_name_list if tokenizer.convert_tokens_to_ids(t) is None]
 if special:
     tokenizer.add_special_token(special)
-model = Qwen2ForCausalLM.from_pretrained(MODEL_PATH, torch_dtype=DTYPE, attn_implementation="sdpa").eval()
+model = Qwen3ForCausalLM.from_pretrained(MODEL_PATH, torch_dtype=DTYPE, attn_implementation="sdpa").eval()
 comp_config.convert2id(tokenizer)
 
 system_prompt = "You are a helpful assistant."

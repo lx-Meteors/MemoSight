@@ -38,7 +38,7 @@ class CustomTrainer(Trainer):
     并注入 forward，使 fixed_cross_entropy 的 sum / N_global 与梯度累计、多卡 gather 语义一致。
     """
 
-    def get_batch_samples(self, epoch_iterator, num_batches):
+    def get_batch_samples(self, epoch_iterator, num_batches, device):
         batch_samples = []
         for _ in range(num_batches):
             try:
@@ -71,11 +71,15 @@ class CustomTrainer(Trainer):
                 lm_total += l
 
         if self.args.average_tokens_across_devices and num_items_in_batch is not None:
-            num_items_in_batch = self.accelerator.gather(num_items_in_batch).sum().item()
+            num_items_in_batch = self.accelerator.gather(num_items_in_batch).sum()
+
+        if torch.is_tensor(num_items_in_batch):
+            num_items_in_batch = num_items_in_batch.to(device)
+            if self.args.n_gpu > 1 and num_items_in_batch.dim() == 0:
+                num_items_in_batch = num_items_in_batch.unsqueeze(0)
 
         if has_reg:
             if self.args.average_tokens_across_devices:
-                device = self.args.device
                 mtp_t = torch.tensor(mtp_total, device=device, dtype=torch.long)
                 lm_t = torch.tensor(lm_total, device=device, dtype=torch.long)
                 mtp_total = self.accelerator.gather(mtp_t).sum().item()
