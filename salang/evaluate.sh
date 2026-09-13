@@ -1,6 +1,6 @@
 # ==================== 通过命令行传入必要超参数 ====================
 # 使用方法: ./script.sh [method] [tokenizer_path] [dataset] [base_path] [comp_config] [model_type] [bos_token] [eos_token] [cache_size] [interaction]
-# 示例: ./script.sh "anchor-thought" "/tmp/hx/Qwen/Qwen2.5-1.5B-Instruct" "gsm8k" "/tmp/hx/rrcot/lightthinker/inference/gsm8k"
+# 示例: ./script.sh "anchor-thought" "Qwen/Qwen3-8B" "gsm8k" "./experiments/qwen3_distillr1/inference/gsm8k"
 
 # 检查必需参数（至少需要4个：method, tokenizer_path, dataset, base_path）
 if [ $# -lt 4 ]; then
@@ -16,7 +16,7 @@ if [ $# -lt 4 ]; then
     echo "  eos_token: 可选，EOS token（默认: <|im_end|>）"
     echo "  cache_size: 可选，缓存大小（默认: 1024）"
     echo "  interaction: 可选，是否启用交互模式（默认: false）"
-    echo "示例: $0 \"anchor-thought\" \"/tmp/hx/Qwen/Qwen2.5-1.5B-Instruct\" \"gsm8k\" \"/tmp/hx/rrcot/lightthinker/inference/gsm8k\""
+    echo "示例: $0 \"anchor-thought\" \"Qwen/Qwen3-8B\" \"gsm8k\" \"./experiments/qwen3_distillr1/inference/gsm8k\""
     exit 1
 fi
 

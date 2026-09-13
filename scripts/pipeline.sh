@@ -89,7 +89,7 @@ print_help() {
   --tokenizer_path           tokenizer 路径
   --model_path               base model 路径
   --train_data_path          训练数据路径
-  --conf_version             压缩配置版本（默认 v1）
+  --conf_version             压缩配置版本（默认 distillr1）
   --train_gpus               训练卡号，逗号分隔（默认 0,1,2,3,4,5,6,7）
   --max_length               默认 4096
   --epochs                   默认 5
@@ -115,7 +115,7 @@ print_help() {
 评估相关:
   --eval_method              默认 normal
   --datasets                 逗号分隔（默认 mmlu,gsm8k,gpqa,bbh）
-  --comp_config              默认 configs/LightThinker/qwen/v1.json
+  --comp_config              默认 configs/LightThinker/qwen/distillr1.json
   --model_type               默认 qwen
   --bos_token                默认 <|im_start|>
   --eos_token                默认 <|im_end|>
@@ -248,8 +248,8 @@ run_infer() {
     local resolved_ckpt
     local tokenizer_path_infer
 
-    # 若指定了可用的 --model_path，则直接用于推理（无需训练目录）
-    if [[ -n "${MODEL_PATH}" ]] && [[ -e "${MODEL_PATH}" ]]; then
+    # infer 阶段允许本地路径或 Hugging Face repo id；all 阶段使用刚训练出的 checkpoint。
+    if [[ "${STAGE}" == "infer" ]] && [[ -n "${MODEL_PATH}" ]]; then
         infer_model_path="${MODEL_PATH}"
         resolved_ckpt="-1"
         tokenizer_path_infer="${TOKENIZER_PATH:-${MODEL_PATH}}"
@@ -337,12 +337,26 @@ run_infer() {
 run_eval() {
     require_non_empty "--tokenizer_path" "${TOKENIZER_PATH}"
     local eval_py="${ROOT_DIR}/evaluation/eval_file.py"
+    local eval_init_py="${ROOT_DIR}/evaluation/init.py"
     require_file "${eval_py}"
 
     local infer_base="${EXP_ROOT}/inference"
     local ds_arr=()
     csv_to_array "${DATASETS}" ds_arr
     [[ "${#ds_arr[@]}" -gt 0 ]] || die "--datasets 不能为空"
+
+    local missing_reference="false"
+    for ds in "${ds_arr[@]}"; do
+        if [[ ! -f "${ROOT_DIR}/data/eval/${ds}.jsonl" ]]; then
+            missing_reference="true"
+            break
+        fi
+    done
+    if [[ "${missing_reference}" == "true" ]]; then
+        require_file "${eval_init_py}"
+        log "评估 reference JSONL 不存在，正在自动生成..."
+        python "${eval_init_py}"
+    fi
 
     local comp_cfg
     comp_cfg="$(to_abs_path "${COMP_CONFIG}")"
@@ -400,7 +414,7 @@ MODE=""
 TOKENIZER_PATH=""
 MODEL_PATH=""
 TRAIN_DATA_PATH=""
-CONF_VERSION="v1"
+CONF_VERSION="distillr1"
 TRAIN_GPUS="0,1,2,3,4,5,6,7"
 MAX_LENGTH=4096
 EPOCHS=5
@@ -431,7 +445,7 @@ SPEC_DECODE="false"
 # 评估参数
 EVAL_METHOD="normal"
 DATASETS="mmlu,gsm8k,gpqa,bbh"
-COMP_CONFIG="configs/LightThinker/qwen/v1.json"
+COMP_CONFIG="configs/LightThinker/qwen/distillr1.json"
 MODEL_TYPE="qwen"
 BOS_TOKEN="<|im_start|>"
 EOS_TOKEN="<|im_end|>"
@@ -520,9 +534,7 @@ log "exp_root=${EXP_ROOT}"
 
 case "${STAGE}" in
     train) run_train ;;
-    infer) 
-        run_infer
-        run_eval ;;
+    infer) run_infer ;;
     eval) run_eval ;;
     all)
         run_train
@@ -535,47 +547,53 @@ esac
 log "执行完成: ${STAGE}"
 
 
-# # 运行示例 train
-# bash /mnt/lxy/RRcot/scripts/pipeline.sh \
+# ========== Qwen3-8B + DistillR1 运行示例 ==========
+# # 仅训练
+# bash scripts/pipeline.sh \
 #   --stage train \
-#   --exp_tag vanilla_qwen \
-#   --output_base_dir /mnt/lxy/RRcot/experiments \
+#   --exp_tag distillr1_qwen3_8b \
+#   --output_base_dir ./experiments \
 #   --use_epl false \
 #   --lr 1e-5 \
 #   --mode normal \
 #   --model_type qwen \
-#   --tokenizer_path /mnt/lxy/hf_models/Qwen2.5-1.5B-Instruct \
-#   --model_path /mnt/lxy/hf_models/DeepSeek-R1-Distill-Qwen-1.5B \
-#   --train_data_path /mnt/lxy/RRcot/data/train/train_debug.jsonl \
+#   --tokenizer_path Qwen/Qwen3-8B \
+#   --model_path Qwen/Qwen3-8B \
+#   --conf_version distillr1 \
+#   --train_data_path /path/to/train.jsonl \
 #   --train_gpus 0,1,2,3
 
-# # 运行示例 all
-# bash /mnt/lxy/RRcot/scripts/pipeline.sh \
+# # train -> DistillR1 infer -> eval
+# bash scripts/pipeline.sh \
 #   --stage all \
-#   --exp_tag vanilla_qwen \
-#   --output_base_dir /mnt/lxy/RRcot/experiments \
+#   --exp_tag distillr1_qwen3_8b \
+#   --output_base_dir ./experiments \
 #   --use_epl false \
 #   --lr 1e-5 \
 #   --mode normal \
 #   --model_type qwen \
-#   --tokenizer_path /mnt/lxy/hf_models/Qwen2.5-1.5B-Instruct \
-#   --model_path /mnt/lxy/hf_models/DeepSeek-R1-Distill-Qwen-1.5B \
-#   --train_data_path /mnt/lxy/RRcot/data/train/train_debug.jsonl \
+#   --tokenizer_path Qwen/Qwen3-8B \
+#   --model_path Qwen/Qwen3-8B \
+#   --conf_version distillr1 \
+#   --comp_config configs/LightThinker/qwen/distillr1.json \
+#   --train_data_path /path/to/train.jsonl \
 #   --train_gpus 0,1,2,3 \
 #   --target_gpus 0,1,2,3 \
 #   --process_per_gpu 1 \
 #   --datasets mmlu,gsm8k,gpqa,bbh
 
 
-# # 运行示例 infer
-# bash /mnt/lxy/RRcot/scripts/pipeline.sh \
+# # 直接使用官方 Qwen3-8B 做 DistillR1 推理
+# bash scripts/pipeline.sh \
 #   --stage infer \
-#   --model_path /mnt/zhaorunsong/lx/rrcot_test/epl_apa_mtp_w3e-1/train/checkpoint-245 \
-#   --output_base_dir /mnt/lxy/RRcot/experiments/debug_infer_spec_decode \
+#   --exp_tag distillr1_qwen3_8b_infer \
+#   --model_path Qwen/Qwen3-8B \
+#   --output_base_dir ./experiments \
 #   --use_epl false \
-#   --spec_decode true \
+#   --spec_decode false \
 #   --model_type qwen \
-#   --tokenizer_path /mnt/lxy/hf_models/DeepSeek-R1-Distill-Qwen-1.5B \
+#   --tokenizer_path Qwen/Qwen3-8B \
+#   --comp_config configs/LightThinker/qwen/distillr1.json \
 #   --target_gpus 0 \
 #   --process_per_gpu 1 \
-#   --datasets mmlu
+#   --datasets gsm8k

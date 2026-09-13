@@ -1,0 +1,4 @@
+jsonlines
+transformers>=4.51.3
+sglang
+tqdm

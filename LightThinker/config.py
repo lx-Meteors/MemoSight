@@ -126,22 +126,22 @@ class Config:
             self.register_token_desp
         ]
 
-        # 为qwen2.5
-        # if self.template_cfg['model'] == 'qwen':
-        #     self.bos_token = "<|im_start|>"
-        #     self.bos_token_desp = "<|im_start|>"
-        #     self.bos_token_id:int = None
+        # Qwen3 chat template tokens
+        if self.template_cfg['model'] == 'qwen':
+            self.bos_token = "<|im_start|>"
+            self.bos_token_desp = "<|im_start|>"
+            self.bos_token_id:int = None
 
-        #     self.eos_token = "<|im_end|>"
-        #     self.eos_token_desp = "<|im_end|>"
-        #     self.eos_token_id:int = None
+            self.eos_token = "<|im_end|>"
+            self.eos_token_desp = "<|im_end|>"
+            self.eos_token_id:int = None
 
-        #     self.special_token_name_list.extend(
-        #         [self.eos_token, self.bos_token]
-        #     )
-        #     self.special_token_desp_list.extend(
-        #         [self.eos_token_desp, self.bos_token_desp]
-        #     )
+            self.special_token_name_list.extend(
+                [self.eos_token, self.bos_token]
+            )
+            self.special_token_desp_list.extend(
+                [self.eos_token_desp, self.bos_token_desp]
+            )
 
         self.special_token_id_list: List[int] = list()
 
@@ -196,13 +196,13 @@ class Config:
             self.double_new_line_token
         )
 
-        # if self.template_cfg['model'] == 'qwen':
-        #     self.bos_token_id = tokenizer.convert_tokens_to_ids(
-        #         self.bos_token
-        #     )
-        #     self.eos_token_id = tokenizer.convert_tokens_to_ids(
-        #         self.eos_token
-        #     )
+        if self.template_cfg['model'] == 'qwen':
+            self.bos_token_id = tokenizer.convert_tokens_to_ids(
+                self.bos_token
+            )
+            self.eos_token_id = tokenizer.convert_tokens_to_ids(
+                self.eos_token
+            )
 
         self.prompt_comp_token_id_list:List[int] = [
             tokenizer.convert_tokens_to_ids(token) for token in self.prompt_comp_token_name_list
@@ -253,4 +253,3 @@ class Config:
         else:
             return self.output_comp_token_id_list
     
-

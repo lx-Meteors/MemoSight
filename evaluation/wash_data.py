@@ -5,12 +5,13 @@ from pathlib import Path
 # ===============================
 # 配置区（自己改这里即可）
 # ===============================
-INPUT_PATH = "/mnt/zhaorunsong/lx/RRcot/data/train/distill.jsonl"        # 原始数据
-OUTPUT_PATH = "/mnt/zhaorunsong/lx/RRcot/data/train/new_data.jsonl"   # 输出数据
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+INPUT_PATH = PROJECT_ROOT / "data/train/distill.jsonl"        # 原始数据
+OUTPUT_PATH = PROJECT_ROOT / "data/train/new_data.jsonl"      # 输出数据
 
 SPLIT_FLAG = "Now, try to solve the following question through the above guidelines:"
-BEGIN_TOKEN = "<｜begin▁of▁sentence｜>"
-USER_TOKEN = "<｜User｜>"
+BEGIN_TOKENS = ("<｜begin▁of▁sentence｜>", "<|im_start|>system\n")
+USER_TOKENS = ("<｜User｜>", "<|im_end|>\n<|im_start|>user\n")
 
 
 # ===============================
@@ -28,7 +29,9 @@ def process_example(example: dict):
     text = example["prompt"]
 
     # 1️⃣ 去掉 begin token
-    text = text.replace(BEGIN_TOKEN, "").strip()
+    for token in BEGIN_TOKENS:
+        text = text.replace(token, "")
+    text = text.strip()
 
     # 2️⃣ 按关键句切分
     if SPLIT_FLAG not in text:
@@ -38,7 +41,9 @@ def process_example(example: dict):
     system_part, question_part = text.split(SPLIT_FLAG, 1)
     system_part = system_part + SPLIT_FLAG
     # 3️⃣ 清洗 question
-    question_part = question_part.replace(USER_TOKEN, "").strip()
+    for token in USER_TOKENS:
+        question_part = question_part.replace(token, "")
+    question_part = question_part.strip()
 
     # 4️⃣ 写入新字段
     example["system_prompt"] = system_part.strip()

@@ -1,9 +1,11 @@
 import json
 import re
+from pathlib import Path
 
 
-INPUT_PATH = "/mnt/zhaorunsong/lx/RRcot/data/train/distill.jsonl"        # 原始数据
-OUTPUT_PATH = "/mnt/zhaorunsong/lx/RRcot/data/train/new_data.jsonl"   # 输出数据
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+INPUT_PATH = PROJECT_ROOT / "data/train/distill.jsonl"        # 原始数据
+OUTPUT_PATH = PROJECT_ROOT / "data/train/new_data.jsonl"      # 输出数据
 
 
 # =====================================================

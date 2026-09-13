@@ -19,17 +19,30 @@ class Tokenizer:
         change_rope:bool=False,
     ):
         self.change_rope:bool = change_rope
+        self.bos_token:str = bos_token
+        self.eos_token:str = eos_token
         self.tokenizer:AutoTokenizer = AutoTokenizer.from_pretrained(
             tokenizer_path,
-            # add_prefix_space=add_prefix_space,
+            add_prefix_space=add_prefix_space,
             mean_resizing=False
         )
         if special_token_list != None:
             self.add_special_token(special_token_list)
-        self.bos_token:str = bos_token
-        self.eos_token:str = eos_token
         self.tokenizer.add_eos_token = False
         self.tokenizer.add_bos_token = False
+        self._refresh_special_token_ids()
+
+    def _refresh_special_token_ids(self):
+        self.bos_token_id = (
+            None if self.bos_token is None else self.tokenizer.convert_tokens_to_ids(self.bos_token)
+        )
+        self.eos_token_id = (
+            None if self.eos_token is None else self.tokenizer.convert_tokens_to_ids(self.eos_token)
+        )
+        if self.bos_token is not None and self.bos_token_id is None:
+            raise ValueError(f"Tokenizer does not contain the configured BOS token: {self.bos_token}")
+        if self.eos_token is not None and self.eos_token_id is None:
+            raise ValueError(f"Tokenizer does not contain the configured EOS token: {self.eos_token}")
     
     def add_special_token(self, special_token_list:List[str]):
         _print("expanding tokenizer ...")
@@ -38,12 +51,7 @@ class Tokenizer:
         )
         assert num_added_tokens == len(special_token_list), f"{special_token_list}"
         _print(f"{num_added_tokens} tokens have been added including {special_token_list}")
-        self.bos_token_id = None if self.bos_token == None else self.tokenizer.convert_tokens_to_ids(self.bos_token)
-        self.eos_token_id = None if self.eos_token == None else self.tokenizer.convert_tokens_to_ids(self.eos_token)
-        if self.eos_token_id is None:
-            assert self.eos_token is None
-        if self.bos_token_id is None:
-            assert self.bos_token is None
+        self._refresh_special_token_ids()
         return self.tokenizer
 
     def __getattr__(self, name):
@@ -51,6 +59,17 @@ class Tokenizer:
     
     def __len__(self):
         return len(self.tokenizer)
+
+    def validate_qwen3(self):
+        """Fail fast when a Qwen2/Qwen2.5 tokenizer is paired with a Qwen3 model."""
+        required_tokens = ("<think>", "</think>")
+        vocabulary = self.tokenizer.get_vocab()
+        missing_tokens = [token for token in required_tokens if token not in vocabulary]
+        if missing_tokens:
+            raise ValueError(
+                "The selected tokenizer is not a Qwen3 tokenizer; missing native tokens: "
+                f"{missing_tokens}. Use the tokenizer shipped with the Qwen3 checkpoint."
+            )
 
     def normal_data_tokenize(
         self,
@@ -618,5 +637,3 @@ class Tokenizer:
 if __name__ == '__main__':
     pass
     
-
-

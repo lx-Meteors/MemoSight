@@ -3,23 +3,24 @@
 # ==================== 路径配置 ====================
 # 所有路径统一在此设置，便于在不同服务器上运行
 # ROOT_DIR="/zhaorunsong/RRcot"  # 项目根目录
-ROOT_DIR="/mnt/zhaorunsong/lx/mem-co-t" 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="${ROOT_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 INFERENCE_ROOT_DIR="${ROOT_DIR}/LightThinker"  # 推理脚本使用的代码根目录
 
 # 输出路径配置
-OUTPUT_BASE_DIR="/mnt/zhaorunsong/lx/rrcot_test/test_salang_new"  # 所有输出（训练、推理）的基础目录
+OUTPUT_BASE_DIR="${OUTPUT_BASE_DIR:-${ROOT_DIR}/experiments}"  # 所有输出（训练、推理）的基础目录
 
 # 模型和Tokenizer路径配置
-TOKENIZER_PATH="/mnt/jinbo/RLRM/model/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"  # Tokenizer路径
-MODEL_PATH="/mnt/jinbo/RLRM/model/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"  # 预训练模型路径
+TOKENIZER_PATH="${TOKENIZER_PATH:-Qwen/Qwen3-8B}"  # Tokenizer路径
+MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-8B}"  # 预训练模型路径
 
 # 训练数据路径配置
-TRAIN_DATA_PATH="/home/zhaorunsong.zrs/repo/RRcot/data/train/train.jsonl"  # 训练数据路径
+TRAIN_DATA_PATH="${TRAIN_DATA_PATH:-${ROOT_DIR}/data/train/train.jsonl}"  # 训练数据路径
 
 # Conda环境配置（用于sglang_inference.sh）
-CONDA_SH_PATH="/mnt/zhaorunsong/anaconda3/etc/profile.d/conda.sh"  # Conda初始化脚本路径
+CONDA_SH_PATH="${CONDA_SH_PATH:-}"  # 可选的 Conda 初始化脚本路径
 # CONDA_SH_PATH="/opt/conda/etc/profile.d/conda.sh"
-CONDA_ENV_NAME="sglang"  # Conda环境名称
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-sglang}"  # Conda环境名称
 
 # ==================== 推理和评估配置 ====================
 # 设置推理和评估的默认参数
@@ -28,7 +29,6 @@ CKPT="1305"  # 检查点编号，可以根据实际情况修改
 DATASETS=("bbh" "gpqa" "gsm8k" "mmlu")  # 要评估的数据集
 
 # 获取脚本所在目录
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TRAIN_SCRIPT="${SCRIPT_DIR}/train.sh"
 INFERENCE_SCRIPT="${SCRIPT_DIR}/inference.sh"
 SGLANG_INFERENCE_SCRIPT="${SCRIPT_DIR}/sglang_inference.sh"
@@ -36,8 +36,8 @@ EVALUATE_SCRIPT="${SCRIPT_DIR}/evaluate.sh"
 
 # ==================== 通用函数 ====================
 
-export PYTHONPATH=$PYTHONPATH:${ROOT_DIR}
-cd ${ROOT_DIR}
+export PYTHONPATH="${PYTHONPATH:-}:${ROOT_DIR}"
+cd "${ROOT_DIR}"
 
 # 训练模型
 train_model() {
@@ -75,7 +75,7 @@ inference_and_evaluate() {
     if [ "$inference_script_type" = "sglang_inference" ]; then
         INFERENCE_CMD="${SGLANG_INFERENCE_SCRIPT}"
         echo "使用 sglang_inference.sh 进行推理"
-        bash ${INFERENCE_CMD} "${model_tag}" "${REPETITION_PENALTY}" "${CKPT}" "${INFERENCE_ROOT_DIR}" "${OUTPUT_BASE_DIR}" "${CONDA_SH_PATH}" "${CONDA_ENV_NAME}"
+        bash "${INFERENCE_CMD}" "${model_tag}" "${REPETITION_PENALTY}" "${CKPT}" "${INFERENCE_ROOT_DIR}" "${OUTPUT_BASE_DIR}" "${CONDA_SH_PATH}" "${CONDA_ENV_NAME}" "${MODEL_PATH}"
     else
         INFERENCE_CMD="${INFERENCE_SCRIPT}"
         echo "使用 inference.sh 进行推理"

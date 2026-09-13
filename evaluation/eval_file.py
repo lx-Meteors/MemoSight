@@ -5,6 +5,7 @@ import jsonlines
 from typing import *
 from tqdm import tqdm
 import os
+from pathlib import Path
 
 from utils import _print, read_jsonl
 from LightThinker import Tokenizer, Config
@@ -12,7 +13,8 @@ from constant import CLASS_NORMAL, CLASS_CACHE, CLASS_ANCHOR, CLASS_TOKEN
 
 class Reference:
 
-    PATH_TEMPLATE = "./data/eval/{name}.jsonl"
+    PROJECT_ROOT = Path(__file__).resolve().parents[1]
+    PATH_TEMPLATE = str(PROJECT_ROOT / "data/eval/{name}.jsonl")
 
     def __init__(self, dataset_name:str, interaction:bool):
         self.dataset_name = dataset_name
@@ -380,6 +382,9 @@ def get_tokenizer_and_config(args) -> Tuple[Tokenizer, Config]:
     if len(special_token_list) > 0:
         tokenizer.add_special_token(special_token_list)
 
+    if args.model_type == "qwen":
+        tokenizer.validate_qwen3()
+
     comp_config.convert2id(tokenizer)
 
     return tokenizer, comp_config
@@ -415,4 +420,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

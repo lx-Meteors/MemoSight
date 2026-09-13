@@ -1,8 +1,10 @@
 import json
+from pathlib import Path
 
 # 读取 JSONL
-jsonl_file = "/mnt/jinbo/RLRM/previous_work/MemCoT/RRcot-copy/data/train/train.jsonl"
-json_file = "/mnt/zhaorunsong/lx/RRcot/data/eval/distill.json"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+jsonl_file = PROJECT_ROOT / "data/train/train.jsonl"
+json_file = PROJECT_ROOT / "data/eval/distill.json"
 
 data_list = []
 

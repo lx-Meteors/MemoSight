@@ -1,10 +1,10 @@
 {
     "template": {
         "model": "qwen",
-        "prefix": "",
-        "middle": "<｜User｜>",
-        "suffix": "<｜Assistant｜><think>",
-        "complete": "{system}<｜User｜>{question}<｜Assistant｜><think>"
+        "prefix": "system\n",
+        "middle": "<|im_end|>\n<|im_start|>user\n",
+        "suffix": "<|im_end|>\n<|im_start|>assistant\n<think>\n",
+        "complete": "system\n{system}<|im_end|>\n<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n<think>\n"
     },
     "prompt": {
         "save_template": true,

@@ -5,17 +5,17 @@ import asyncio  # 添加 asyncio 导入
 import argparse
 from typing import List, Dict
 from tqdm import tqdm
-from transformers import AutoTokenizer  
+from transformers import AutoConfig, AutoTokenizer
 
 import sglang as sgl
-from dataset_reader import MMLUReader, BBHReader, GSM8KReader, GPQAReader
 from dataset_reader_cot import MMLUCOTReader, BBHCOTReader, GSM8KCOTReader, GPQACOTReader
 
 DATASET_MAPPING = {
-    "mmlu": MMLUReader,
-    "bbh": BBHReader,
-    "gsm8k": GSM8KReader,
-    "gpqa": GPQAReader,
+    # Keep dataset names and prompts aligned with LightThinker/inference.py.
+    "mmlu": MMLUCOTReader,
+    "bbh": BBHCOTReader,
+    "gsm8k": GSM8KCOTReader,
+    "gpqa": GPQACOTReader,
     "mmlu_cot": MMLUCOTReader,
     "bbh_cot": BBHCOTReader,
     "gsm8k_cot": GSM8KCOTReader,
@@ -24,7 +24,7 @@ DATASET_MAPPING = {
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path", type=str, required=True, help="Path to the Qwen2.5 model")
+    parser.add_argument("--model_path", type=str, required=True, help="Path or Hugging Face repo id for a Qwen3 model")
     parser.add_argument("--datasets", nargs="+", default=["mmlu", "gsm8k", "gpqa", "bbh"], help="Datasets to run")
     parser.add_argument("--output_dir", type=str, default="results", help="Directory to save results")
     parser.add_argument("--tp_size", type=int, default=4, help="Tensor Parallelism size")
@@ -36,9 +36,25 @@ def get_args():
 async def main_async():  # 改为 async 函数
     args = get_args()
     
-    # 2. 初始化 Tokenizer
+    # 2. 校验模型架构并初始化 Tokenizer
+    model_config = AutoConfig.from_pretrained(args.model_path, trust_remote_code=True)
+    if model_config.model_type != "qwen3":
+        raise ValueError(
+            f"Expected a Qwen3 checkpoint, but `{args.model_path}` has "
+            f"model_type={model_config.model_type!r}."
+        )
+
     print(f"[Init] Loading Tokenizer from {args.model_path}...")
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
+    missing_tokens = [
+        token for token in ("<think>", "</think>")
+        if token not in tokenizer.get_vocab()
+    ]
+    if missing_tokens:
+        raise ValueError(
+            "The selected tokenizer is not a Qwen3 tokenizer; missing native tokens: "
+            f"{missing_tokens}."
+        )
     
     # 3. 初始化 SGLang 引擎
     print(f"[Init] Loading Engine from {args.model_path} with TP={args.tp_size}...")
@@ -95,6 +111,10 @@ async def main_async():  # 改为 async 函数
                     tokenize=False, 
                     add_generation_prompt=True
                 )
+                # DistillR1 training pre-fills the reasoning channel. Keep the
+                # SGLang prompt identical to the native inference path.
+                if not full_prompt.endswith("<think>\n"):
+                    full_prompt += "<think>\n"
                 
                 if i == 0:
                     print("\n[DEBUG] Final Prompt sent to model (First Sample):")
