@@ -56,14 +56,15 @@ PyYAML==6.0.3
 regex==2025.11.3
 requests==2.32.5
 safetensors==0.7.0
+sglang>=0.4.9
 six==1.17.0
 sympy==1.14.0
 tensorboard==2.20.0
 tensorboard-data-server==0.7.2
-tokenizers==0.19.1
+tokenizers==0.21.1
 torch==2.9.1
 tqdm==4.67.1
-transformers==4.43.3
+transformers==4.51.3
 triton==3.5.1
 typing-inspection==0.4.2
 typing_extensions==4.15.0

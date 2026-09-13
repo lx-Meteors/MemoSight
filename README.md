@@ -48,9 +48,14 @@ source /mnt/zhaorunsong/anaconda3/etc/profile.d/conda.sh
 
 ## 🔧Installation
 
+This branch targets `Qwen/Qwen3-8B`. Use the model and tokenizer from the same
+Qwen3 checkpoint; Qwen2/Qwen2.5 tokenizers are rejected at startup. SepLLM's
+`SepCache` is included in this repository, so there is no need to patch the
+installed Transformers package manually.
+
 ```bash
-git clone https://github.com/helldog-star/RRcot
-cd RRcot
+git clone -b SepLLM-Qwen3 https://github.com/lx-Meteors/MemoSight.git
+cd MemoSight
 conda create -n lightthinker python=3.9 -y
 conda activate lightthinker
 pip install -r requirements.txt
@@ -129,7 +134,7 @@ Please note that if you set `split_size>1` in the second step, the number of fil
 ```bash
 # The optional values for the method argument are 'anchor-token', 'normal', 'kvcache', and 'anchor-thought'.
 method="anchor-thought"
-tokenizer_path="Qwen/Qwen2.5-7B-Instruct"
+tokenizer_path="Qwen/Qwen3-8B"
 comp_config="configs/LightThinker/qwen/v1.json"
 model_type="qwen"
 dataset="gpqa"
@@ -161,4 +166,3 @@ python evaluation/eval_file.py \
 
 When string matching fails, the output will be displayed in the format "Model Answer" <=> "Standard Answer". At this point, you can input "y" or "n" to evaluate this case. If you believe the model's answer extraction is incorrect, you can input "e" to print the model's complete output, and then input "y" or "n" to evaluate this case.
 </details>
-

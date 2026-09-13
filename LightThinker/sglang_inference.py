@@ -5,7 +5,7 @@ import asyncio  # 添加 asyncio 导入
 import argparse
 from typing import List, Dict
 from tqdm import tqdm
-from transformers import AutoTokenizer  
+from transformers import AutoConfig, AutoTokenizer
 
 import sglang as sgl
 from dataset_reader import MMLUReader, BBHReader, GSM8KReader, GPQAReader
@@ -24,7 +24,7 @@ DATASET_MAPPING = {
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path", type=str, required=True, help="Path to the Qwen2.5 model")
+    parser.add_argument("--model_path", type=str, required=True, help="Path to the Qwen3 model")
     parser.add_argument("--datasets", nargs="+", default=["mmlu", "gsm8k", "gpqa", "bbh"], help="Datasets to run")
     parser.add_argument("--output_dir", type=str, default="results", help="Directory to save results")
     parser.add_argument("--tp_size", type=int, default=4, help="Tensor Parallelism size")
@@ -35,6 +35,13 @@ def get_args():
 
 async def main_async():  # 改为 async 函数
     args = get_args()
+
+    model_config = AutoConfig.from_pretrained(args.model_path, trust_remote_code=True)
+    if model_config.model_type != "qwen3":
+        raise ValueError(
+            f"Expected a Qwen3 checkpoint, but `{args.model_path}` has "
+            f"model_type={model_config.model_type!r}."
+        )
     
     # 2. 初始化 Tokenizer
     print(f"[Init] Loading Tokenizer from {args.model_path}...")

@@ -1,7 +1,7 @@
 
 # ==================== 通过命令行传入必要超参数 ====================
 # 使用方法: ./script.sh [root_dir] [init_tag] [use_EPL] [lr] [mode] [aux_config] [output_base_dir] [tokenizer_path] [model_path] [train_data_path]
-# 示例: ./script.sh "/zhaorunsong/RRcot" "lightthinker" "True" "2e-5" "aug-wo-pc" "configs/mtp_aux_config.json" "/tmp/hx/rrcot" "/tmp/hx/Qwen/Qwen2.5-1.5B-Instruct" "/tmp/hx/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B" "/home/user/data/train.jsonl"
+# 示例: ./script.sh "/zhaorunsong/RRcot" "lightthinker" "True" "2e-5" "aug-wo-pc" "configs/mtp_aux_config.json" "/tmp/hx/rrcot" "/tmp/hx/Qwen/Qwen3-8B" "/tmp/hx/Qwen/Qwen3-8B" "/home/user/data/train.jsonl"
 # 注意: aux_config 为可选参数，默认为 "None"
 
 # 检查必需参数（至少需要9个：root_dir, init_tag, use_EPL, lr, mode, output_base_dir, tokenizer_path, model_path, train_data_path）
@@ -18,7 +18,7 @@ if [ $# -lt 9 ]; then
     echo "  tokenizer_path: 必需，tokenizer路径"
     echo "  model_path: 必需，预训练模型路径"
     echo "  train_data_path: 必需，训练数据路径"
-    echo "示例: $0 \"/zhaorunsong/RRcot\" \"lightthinker\" \"True\" \"2e-5\" \"aug-wo-pc\" \"configs/mtp_aux_config.json\" \"/tmp/hx/rrcot\" \"/tmp/hx/Qwen/Qwen2.5-1.5B-Instruct\" \"/tmp/hx/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B\" \"/home/user/data/train.jsonl\""
+    echo "示例: $0 \"/zhaorunsong/RRcot\" \"lightthinker\" \"True\" \"2e-5\" \"aug-wo-pc\" \"configs/mtp_aux_config.json\" \"/tmp/hx/rrcot\" \"/tmp/hx/Qwen/Qwen3-8B\" \"/tmp/hx/Qwen/Qwen3-8B\" \"/home/user/data/train.jsonl\""
     exit 1
 fi
 
@@ -106,7 +106,7 @@ warmup_ratio=0.05
 warmup_steps=0
 
 # others
-model_size="7b"
+model_size="qwen3_8b"
 # train_path 从命令行参数传入
 train_path="$train_data_path"
 see_current="false"

@@ -17,7 +17,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""PyTorch Qwen2 model."""
+"""PyTorch Qwen3 model."""
 
 import math
 from typing import List, Optional, Tuple, Union
@@ -30,6 +30,7 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache, SlidingWindowCache, StaticCache
 from transformers.generation import GenerationMixin
+from transformers.loss.loss_utils import fixed_cross_entropy
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
@@ -49,25 +50,25 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
-from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
+from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 
 
 if is_flash_attn_2_available():
-    from ...modeling_flash_attention_utils import _flash_attention_forward
+    from transformers.modeling_flash_attention_utils import _flash_attention_forward
 
 
 logger = logging.get_logger(__name__)
 
 
-_CHECKPOINT_FOR_DOC = "Qwen/Qwen2-7B"
-_CONFIG_FOR_DOC = "Qwen2Config"
+_CHECKPOINT_FOR_DOC = "Qwen/Qwen3-8B"
+_CONFIG_FOR_DOC = "Qwen3Config"
 
 
-# Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Qwen2
-class Qwen2RMSNorm(nn.Module):
+# Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Qwen3
+class Qwen3RMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
         """
-        Qwen2RMSNorm is equivalent to T5LayerNorm
+        Qwen3RMSNorm is equivalent to T5LayerNorm
         """
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
@@ -84,8 +85,8 @@ class Qwen2RMSNorm(nn.Module):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
 
-# Copied from transformers.models.llama.modeling_llama.LlamaRotaryEmbedding with Llama->Qwen2
-class Qwen2RotaryEmbedding(nn.Module):
+# Copied from transformers.models.llama.modeling_llama.LlamaRotaryEmbedding with Llama->Qwen3
+class Qwen3RotaryEmbedding(nn.Module):
     def __init__(
         self,
         dim=None,
@@ -94,14 +95,14 @@ class Qwen2RotaryEmbedding(nn.Module):
         device=None,
         scaling_factor=1.0,
         rope_type="default",
-        config: Optional[Qwen2Config] = None,
+        config: Optional[Qwen3Config] = None,
     ):
         super().__init__()
         # TODO (joao): remove the `if` below, only used for BC
         self.rope_kwargs = {}
         if config is None:
             logger.warning_once(
-                "`Qwen2RotaryEmbedding` can now be fully parameterized by passing the model config through the "
+                "`Qwen3RotaryEmbedding` can now be fully parameterized by passing the model config through the "
                 "`config` argument. All other arguments will be removed in v4.46"
             )
             self.rope_kwargs = {
@@ -203,13 +204,13 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     """
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
+    q_embed = (q * cos) + (rotate_half(q) * sin) if q is not None else None
+    k_embed = (k * cos) + (rotate_half(k) * sin) if k is not None else None
     return q_embed, k_embed
 
 
-# Copied from transformers.models.mistral.modeling_mistral.MistralMLP with Mistral->Qwen2
-class Qwen2MLP(nn.Module):
+# Copied from transformers.models.mistral.modeling_mistral.MistralMLP with Mistral->Qwen3
+class Qwen3MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -236,7 +237,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
-class Qwen2Attention(nn.Module):
+class Qwen3Attention(nn.Module):
     """
     Multi-headed attention from 'Attention Is All You Need' paper. Modified to use sliding window attention: Longformer
     and "Generating Long Sequences with Sparse Transformers".
@@ -246,23 +247,74 @@ class Qwen2Attention(nn.Module):
         self.new_q = q
         self.new_k = k
         self.new_v = v
-        if q:
+        factory_kwargs = {
+            "device": self.q_proj.weight.device,
+            "dtype": self.q_proj.weight.dtype,
+        }
+        if q and not hasattr(self, "_q_proj"):
             print(f"add q for layer {self.layer_idx}")
-            self._q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=self.config.attention_bias)
+            self._q_proj = nn.Linear(
+                self.hidden_size,
+                self.num_heads * self.head_dim,
+                bias=self.config.attention_bias,
+                **factory_kwargs,
+            )
             self._q_proj.weight.data.zero_()
+            if self._q_proj.bias is not None:
+                self._q_proj.bias.data.zero_()
             self._q_proj._is_hf_initialized = True
-        if k:
+        if k and not hasattr(self, "_k_proj"):
             print(f"add k for layer {self.layer_idx}")
-            self._k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=self.config.attention_bias)
+            self._k_proj = nn.Linear(
+                self.hidden_size,
+                self.num_key_value_heads * self.head_dim,
+                bias=self.config.attention_bias,
+                **factory_kwargs,
+            )
             self._k_proj.weight.data.zero_()
+            if self._k_proj.bias is not None:
+                self._k_proj.bias.data.zero_()
             self._k_proj._is_hf_initialized = True
-        if v:
+        if v and not hasattr(self, "_v_proj"):
             print(f"add v for layer {self.layer_idx}")
-            self._v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=self.config.attention_bias)
+            self._v_proj = nn.Linear(
+                self.hidden_size,
+                self.num_key_value_heads * self.head_dim,
+                bias=self.config.attention_bias,
+                **factory_kwargs,
+            )
             self._v_proj.weight.data.zero_()
+            if self._v_proj.bias is not None:
+                self._v_proj.bias.data.zero_()
             self._v_proj._is_hf_initialized = True
 
-    def __init__(self, config: Qwen2Config, layer_idx: Optional[int] = None):
+    def _project_qkv(
+        self,
+        hidden_states: torch.Tensor,
+        row_comp_index: Optional[torch.Tensor] = None,
+        column_comp_index: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
+
+        has_comp_positions = row_comp_index is not None and column_comp_index is not None
+        if self.new_q and has_comp_positions:
+            query_states[row_comp_index, column_comp_index] = self._q_proj(
+                hidden_states[row_comp_index, column_comp_index]
+            )
+        if self.new_k and has_comp_positions:
+            key_states[row_comp_index, column_comp_index] = self._k_proj(
+                hidden_states[row_comp_index, column_comp_index]
+            )
+        if self.new_v and has_comp_positions:
+            value_states[row_comp_index, column_comp_index] = self._v_proj(
+                hidden_states[row_comp_index, column_comp_index]
+            )
+
+        return query_states, key_states, value_states
+
+    def __init__(self, config: Qwen3Config, layer_idx: Optional[int] = None):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -275,7 +327,8 @@ class Qwen2Attention(nn.Module):
 
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
-        self.head_dim = self.hidden_size // self.num_heads
+        # Qwen3 exposes head_dim explicitly and applies RMSNorm to every Q/K head.
+        self.head_dim = getattr(config, "head_dim", self.hidden_size // self.num_heads)
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.max_position_embeddings = config.max_position_embeddings
@@ -283,21 +336,32 @@ class Qwen2Attention(nn.Module):
         self.is_causal = True
         self.attention_dropout = config.attention_dropout
 
-        if (self.head_dim * self.num_heads) != self.hidden_size:
-            raise ValueError(
-                f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
-                f" and `num_heads`: {self.num_heads})."
-            )
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=True)
-        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=True)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=True)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
+        self.attention_output_size = self.num_heads * self.head_dim
+        self.q_proj = nn.Linear(
+            self.hidden_size, self.attention_output_size, bias=config.attention_bias
+        )
+        self.k_proj = nn.Linear(
+            self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.v_proj = nn.Linear(
+            self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.o_proj = nn.Linear(
+            self.attention_output_size, self.hidden_size, bias=config.attention_bias
+        )
+        self.q_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         self.new_q: bool = False
         self.new_k: bool = False
         self.new_v: bool = False
+        self.add_params(
+            q=bool(getattr(config, "lightthinker_new_q", False)),
+            k=bool(getattr(config, "lightthinker_new_k", False)),
+            v=bool(getattr(config, "lightthinker_new_v", False)),
+        )
 
-        self.rotary_emb = Qwen2RotaryEmbedding(config=self.config)
+        self.rotary_emb = Qwen3RotaryEmbedding(config=self.config)
 
     def forward(
         self,
@@ -314,20 +378,17 @@ class Qwen2Attention(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
-
-        if self.new_q:
-            query_states[row_comp_index, column_comp_index] = self._q_proj(hidden_states[row_comp_index, column_comp_index])
-        if self.new_k:
-            key_states[row_comp_index, column_comp_index] = self._k_proj(hidden_states[row_comp_index, column_comp_index])
-        if self.new_v:
-            value_states[row_comp_index, column_comp_index] = self._v_proj(hidden_states[row_comp_index, column_comp_index])
+        query_states, key_states, value_states = self._project_qkv(
+            hidden_states, row_comp_index, column_comp_index
+        )
 
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        query_states = self.q_norm(
+            query_states.view(bsz, q_len, self.num_heads, self.head_dim)
+        ).transpose(1, 2)
+        key_states = self.k_norm(
+            key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim)
+        ).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
         if position_embeddings is None:
@@ -367,7 +428,7 @@ class Qwen2Attention(nn.Module):
             )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+        attn_output = attn_output.reshape(bsz, q_len, self.attention_output_size)
 
         attn_output = self.o_proj(attn_output)
 
@@ -377,9 +438,9 @@ class Qwen2Attention(nn.Module):
         return attn_output, attn_weights, past_key_value
 
 
-class Qwen2FlashAttention2(Qwen2Attention):
+class Qwen3FlashAttention2(Qwen3Attention):
     """
-    Qwen2 flash attention module, following Qwen2 attention module. This module inherits from `Qwen2Attention`
+    Qwen3 flash attention module, following Qwen3 attention module. This module inherits from `Qwen3Attention`
     as the weights of the module stays untouched. The only required change would be on the forward pass
     where it needs to correctly call the public API of flash attention and deal with padding tokens
     in case the input contains any of them. Additionally, for sliding window attention, we apply SWA only to the bottom
@@ -405,15 +466,22 @@ class Qwen2FlashAttention2(Qwen2Attention):
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        **kwargs,
     ):
         bsz, q_len, _ = hidden_states.size()
 
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
+        query_states, key_states, value_states = self._project_qkv(
+            hidden_states,
+            kwargs.pop("row_comp_index", None),
+            kwargs.pop("column_comp_index", None),
+        )
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        query_states = self.q_norm(
+            query_states.view(bsz, q_len, self.num_heads, self.head_dim)
+        ).transpose(1, 2)
+        key_states = self.k_norm(
+            key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim)
+        ).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
         if position_embeddings is None:
@@ -487,7 +555,7 @@ class Qwen2FlashAttention2(Qwen2Attention):
             use_top_left_mask=self._flash_attn_uses_top_left_mask,
         )
 
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
+        attn_output = attn_output.reshape(bsz, q_len, self.attention_output_size).contiguous()
         attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
@@ -496,14 +564,14 @@ class Qwen2FlashAttention2(Qwen2Attention):
         return attn_output, attn_weights, past_key_value
 
 
-class Qwen2SdpaAttention(Qwen2Attention):
+class Qwen3SdpaAttention(Qwen3Attention):
     """
-    Qwen2 attention module using torch.nn.functional.scaled_dot_product_attention. This module inherits from
-    `Qwen2Attention` as the weights of the module stays untouched. The only changes are on the forward pass to adapt to
+    Qwen3 attention module using torch.nn.functional.scaled_dot_product_attention. This module inherits from
+    `Qwen3Attention` as the weights of the module stays untouched. The only changes are on the forward pass to adapt to
     SDPA API.
     """
 
-    # Adapted from Qwen2Attention.forward
+    # Adapted from Qwen3Attention.forward
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -514,11 +582,12 @@ class Qwen2SdpaAttention(Qwen2Attention):
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if output_attentions:
             # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
             logger.warning_once(
-                "Qwen2Model is using Qwen2SdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to the manual attention implementation, "
+                "Qwen3Model is using Qwen3SdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to the manual attention implementation, "
                 'but specifying the manual implementation will be required from Transformers version v5.0.0 onwards. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
             )
             return super().forward(
@@ -528,16 +597,26 @@ class Qwen2SdpaAttention(Qwen2Attention):
                 past_key_value=past_key_value,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings,
+                row_comp_index=kwargs.pop("row_comp_index", None),
+                column_comp_index=kwargs.pop("column_comp_index", None),
             )
 
         bsz, q_len, _ = hidden_states.size()
 
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
+        query_states, key_states, value_states = self._project_qkv(
+            hidden_states,
+            kwargs.pop("row_comp_index", None),
+            kwargs.pop("column_comp_index", None),
+        )
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        query_states = self.q_norm(
+            query_states.view(bsz, q_len, self.num_heads, self.head_dim)
+        ).transpose(1, 2)
+        key_states = self.k_norm(
+            key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim)
+        ).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
         if position_embeddings is None:
@@ -585,22 +664,22 @@ class Qwen2SdpaAttention(Qwen2Attention):
         )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(bsz, q_len, self.hidden_size)
+        attn_output = attn_output.view(bsz, q_len, self.attention_output_size)
 
         attn_output = self.o_proj(attn_output)
 
         return attn_output, None, past_key_value
 
 
-QWEN2_ATTENTION_CLASSES = {
-    "eager": Qwen2Attention,
-    "flash_attention_2": Qwen2FlashAttention2,
-    "sdpa": Qwen2SdpaAttention,
+QWEN3_ATTENTION_CLASSES = {
+    "eager": Qwen3Attention,
+    "flash_attention_2": Qwen3FlashAttention2,
+    "sdpa": Qwen3SdpaAttention,
 }
 
 
-class Qwen2DecoderLayer(nn.Module):
-    def __init__(self, config: Qwen2Config, layer_idx: int):
+class Qwen3DecoderLayer(nn.Module):
+    def __init__(self, config: Qwen3Config, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
 
@@ -609,11 +688,11 @@ class Qwen2DecoderLayer(nn.Module):
                 f"Sliding Window Attention is enabled but not implemented for `{config._attn_implementation}`; "
                 "unexpected results may be encountered."
             )
-        self.self_attn = QWEN2_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx)
+        self.self_attn = QWEN3_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx)
 
-        self.mlp = Qwen2MLP(config)
-        self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.mlp = Qwen3MLP(config)
+        self.input_layernorm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -687,7 +766,7 @@ class Qwen2DecoderLayer(nn.Module):
         return outputs
 
 
-QWEN2_START_DOCSTRING = r"""
+QWEN3_START_DOCSTRING = r"""
     This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the generic methods the
     library implements for all its model (such as downloading or saving, resizing the input embeddings, pruning heads
     etc.)
@@ -697,7 +776,7 @@ QWEN2_START_DOCSTRING = r"""
     and behavior.
 
     Parameters:
-        config ([`Qwen2Config`]):
+        config ([`Qwen3Config`]):
             Model configuration class with all the parameters of the model. Initializing with a config file does not
             load the weights associated with the model, only the configuration. Check out the
             [`~PreTrainedModel.from_pretrained`] method to load the model weights.
@@ -705,20 +784,21 @@ QWEN2_START_DOCSTRING = r"""
 
 
 @add_start_docstrings(
-    "The bare Qwen2 Model outputting raw hidden-states without any specific head on top.",
-    QWEN2_START_DOCSTRING,
+    "The bare Qwen3 Model outputting raw hidden-states without any specific head on top.",
+    QWEN3_START_DOCSTRING,
 )
-class Qwen2PreTrainedModel(PreTrainedModel):
-    config_class = Qwen2Config
+class Qwen3PreTrainedModel(PreTrainedModel):
+    config_class = Qwen3Config
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
-    _no_split_modules = ["Qwen2DecoderLayer"]
-    _skip_keys_device_placement = "past_key_values"
+    _no_split_modules = ["Qwen3DecoderLayer"]
+    _skip_keys_device_placement = ["past_key_values"]
     _supports_flash_attn_2 = True
     _supports_sdpa = True
     _supports_cache_class = True
     _supports_quantized_cache = True
     _supports_static_cache = True
+    _supports_attention_backend = True
 
     def _init_weights(self, module):
         std = self.config.initializer_range
@@ -732,7 +812,7 @@ class Qwen2PreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
 
 
-QWEN2_INPUTS_DOCSTRING = r"""
+QWEN3_INPUTS_DOCSTRING = r"""
     Args:
         input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
             Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
@@ -808,36 +888,49 @@ QWEN2_INPUTS_DOCSTRING = r"""
 
 
 @add_start_docstrings(
-    "The bare Qwen2 Model outputting raw hidden-states without any specific head on top.",
-    QWEN2_START_DOCSTRING,
+    "The bare Qwen3 Model outputting raw hidden-states without any specific head on top.",
+    QWEN3_START_DOCSTRING,
 )
-class Qwen2Model(Qwen2PreTrainedModel):
+class Qwen3Model(Qwen3PreTrainedModel):
     """
-    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`Qwen2DecoderLayer`]
+    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`Qwen3DecoderLayer`]
 
     Args:
-        config: Qwen2Config
+        config: Qwen3Config
     """
-
+    #创建一个新的embedding层
     def freeze_embed(self, new_token_cnt:int, origin_length:int):
+        if new_token_cnt == 0 and self.special_embed is not None:
+            # Resuming from a checkpoint whose tokenizer already contains the added tokens.
+            return
         self.origin_length = origin_length
         self.new_token_cnt = new_token_cnt
-        self.special_embed = nn.Embedding(new_token_cnt, self.config.hidden_size, self.padding_idx)
+        self.config.lightthinker_special_token_count = new_token_cnt
+        self.config.lightthinker_special_token_origin = origin_length
+        if self.special_embed is None or self.special_embed.num_embeddings != new_token_cnt:
+            self.special_embed = nn.Embedding(new_token_cnt, self.config.hidden_size).to(
+                device=self.embed_tokens.weight.device,
+                dtype=self.embed_tokens.weight.dtype,
+            )
 
 
-    def __init__(self, config: Qwen2Config):
+    def __init__(self, config: Qwen3Config):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.special_embed = None
+        self.new_token_cnt = int(getattr(config, "lightthinker_special_token_count", 0))
+        self.origin_length = int(getattr(config, "lightthinker_special_token_origin", config.vocab_size))
+        self.special_embed = (
+            nn.Embedding(self.new_token_cnt, config.hidden_size) if self.new_token_cnt > 0 else None
+        )
         self.layers = nn.ModuleList(
-            [Qwen2DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [Qwen3DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         self._attn_implementation = config._attn_implementation
-        self.norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.rotary_emb = Qwen2RotaryEmbedding(config=config)
+        self.norm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.rotary_emb = Qwen3RotaryEmbedding(config=config)
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
@@ -849,7 +942,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
-    @add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(QWEN3_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -897,11 +990,12 @@ class Qwen2Model(Qwen2PreTrainedModel):
                     "(https://huggingface.co/docs/transformers/kv_cache#legacy-cache-format)"
                 )
 
+        # 用新的token替代掉原有的token
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
             if self.special_embed != None:
                 new_indices = input_ids - self.origin_length
-                # Find those between 0 and new_token_cnt.
+                # 找到0～new_token_cnt之间的
                 mask = (new_indices >= 0) & (new_indices < self.new_token_cnt)  # [bs, length]
                 new_embeds = self.special_embed(new_indices[mask])
                 inputs_embeds[mask] = new_embeds
@@ -1064,7 +1158,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         return causal_mask
 
     @staticmethod
-    # Copied from transformers.models.mistral.modeling_mistral.MistralModel._prepare_4d_causal_attention_mask_with_cache_position with Mistral->Qwen2
+    # Copied from transformers.models.mistral.modeling_mistral.MistralModel._prepare_4d_causal_attention_mask_with_cache_position with Mistral->Qwen3
     def _prepare_4d_causal_attention_mask_with_cache_position(
         attention_mask: torch.Tensor,
         sequence_length: int,
@@ -1073,7 +1167,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         device: torch.device,
         cache_position: torch.Tensor,
         batch_size: int,
-        config: Qwen2Config,
+        config: Qwen3Config,
         past_key_values: Cache,
     ):
         """
@@ -1095,7 +1189,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
                 Indices depicting the position of the input sequence tokens in the sequence.
             batch_size (`torch.Tensor`):
                 Batch size.
-            config (`Qwen2Config`):
+            config (`Qwen3Config`):
                 The model's configuration class
             past_key_values (`Cache`):
                 The cache class that is being used currently to generate
@@ -1132,27 +1226,33 @@ class Qwen2Model(Qwen2PreTrainedModel):
         return causal_mask
 
 
-class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
+class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = Qwen2Model(config)
+        self.model = Qwen3Model(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
+        self.mtp_loss_weight = getattr(config, "mtp_loss_weight", 1.0)
+        self.lm_loss_weight = getattr(config, "lm_loss_weight", 1.0)
+
         # Initialize weights and apply final processing
         self.post_init()
-        
+
     def add_qkv(self, q:bool=False, k:bool=False, v:bool=False):
+        self.config.lightthinker_new_q = q
+        self.config.lightthinker_new_k = k
+        self.config.lightthinker_new_v = v
         for decoder_layer in self.model.layers:
             decoder_layer.self_attn.add_params(q, k, v)
 
     def freeze_embed(self, new_token_cnt:int, origin_length:int):
         self.model.freeze_embed(new_token_cnt, origin_length)
         tags = [
-            "_v_proj", 
-            "_q_proj", 
+            "_v_proj",
+            "_q_proj",
             "_k_proj",
             "special_embed"
         ]
@@ -1183,7 +1283,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     def get_decoder(self):
         return self.model
 
-    @add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(QWEN3_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
     def forward(
         self,
@@ -1198,9 +1298,10 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        num_logits_to_keep: int = 0,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
         row_comp_index: Optional[torch.Tensor]=None,
         column_comp_index: Optional[torch.Tensor]=None,
+        system_prompt_length: Optional[torch.LongTensor] = None,
         **loss_kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
@@ -1210,8 +1311,8 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
                 config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
                 (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
 
-            num_logits_to_keep (`int`, *optional*):
-                Calculate logits for the last `num_logits_to_keep` tokens. If `0`, calculate logits for all
+            logits_to_keep (`int` or `torch.Tensor`, *optional*):
+                Calculate logits for the last `logits_to_keep` tokens. If `0`, calculate logits for all
                 `input_ids` (special case). Only last token logits are needed for generation, and calculating them only for that
                 token can save memory, which becomes pretty significant for long sequences or large vocabulary size.
 
@@ -1220,9 +1321,9 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         Example:
 
         ```python
-        >>> from transformers import AutoTokenizer, Qwen2ForCausalLM
+        >>> from transformers import AutoTokenizer, Qwen3ForCausalLM
 
-        >>> model = Qwen2ForCausalLM.from_pretrained(PATH_TO_CONVERTED_WEIGHTS)
+        >>> model = Qwen3ForCausalLM.from_pretrained(PATH_TO_CONVERTED_WEIGHTS)
         >>> tokenizer = AutoTokenizer.from_pretrained(PATH_TO_CONVERTED_TOKENIZER)
 
         >>> prompt = "Hey, are you conscious? Can you talk to me?"
@@ -1240,6 +1341,14 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        # Backward compatibility with the Qwen2-era call signature used by this project.
+        legacy_logits_to_keep = loss_kwargs.pop("num_logits_to_keep", None)
+        if legacy_logits_to_keep is not None:
+            if logits_to_keep != 0:
+                raise ValueError("Pass only one of `logits_to_keep` and `num_logits_to_keep`.")
+            logits_to_keep = legacy_logits_to_keep
+
+
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
             input_ids=input_ids,
@@ -1249,7 +1358,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
+            output_hidden_states=True,
             return_dict=return_dict,
             cache_position=cache_position,
             row_comp_index=row_comp_index,
@@ -1258,11 +1367,93 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
         hidden_states = outputs[0]
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-        logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
+        # `logits_to_keep` is the Qwen3/Transformers 4.51 generation API. A tensor
+        # is also accepted for packed-sequence training.
+        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
 
         loss = None
         if labels is not None:
-            loss = self.loss_function(logits, labels, self.vocab_size, **loss_kwargs)
+            mtp_num_items_in_batch = loss_kwargs.pop("mtp_num_items_in_batch", None)
+            lm_num_items_in_batch = loss_kwargs.pop("lm_num_items_in_batch", None)
+            # register_token_index 与 labels 已对齐：1 表示 MTP aux loss 区域
+            register_token_index = loss_kwargs.pop("register_token_index", None)
+
+            if register_token_index is not None:
+
+                register_token_index = register_token_index.to(labels.device).bool()
+                # MTP: register 位置不做 shift，当前位置 logits 直接监督当前位置 label
+                mtp_logits = logits[register_token_index]
+                mtp_labels = labels[register_token_index]
+
+                # LM: 先筛选出非 register token，再在筛选后的序列上做相邻错位
+                non_register_mask = ~register_token_index
+                filtered_lm_logits = logits[non_register_mask]
+                filtered_lm_labels = labels[non_register_mask]
+
+                shift_lm_logits = filtered_lm_logits[:-1].contiguous()
+                shift_lm_labels = filtered_lm_labels[1:].contiguous()
+
+                # 利用每个 batch 的非 register token 数量构造边界，避免创建 [B, T] 的 batch_idx 大张量
+                non_register_counts = non_register_mask.sum(dim=1)
+                if shift_lm_labels.numel() > 0:
+                    valid_shift_mask = torch.ones(shift_lm_labels.size(0), dtype=torch.bool, device=labels.device)
+                    boundary_pos = non_register_counts.cumsum(dim=0)[:-1] - 1
+                    boundary_pos = boundary_pos[(boundary_pos >= 0) & (boundary_pos < valid_shift_mask.size(0))]
+                    valid_shift_mask[boundary_pos] = False
+                else:
+                    valid_shift_mask = shift_lm_labels.new_zeros((0,), dtype=torch.bool)
+
+                safe_lm_logits = shift_lm_logits[valid_shift_mask]
+                safe_lm_labels = shift_lm_labels[valid_shift_mask]
+
+                zero_loss = logits.sum() * 0.0
+                num_items_in_batch = loss_kwargs.get("num_items_in_batch", None)
+                if isinstance(num_items_in_batch, torch.Tensor):
+                    num_items_in_batch = num_items_in_batch.item()
+                if isinstance(mtp_num_items_in_batch, torch.Tensor):
+                    mtp_num_items_in_batch = mtp_num_items_in_batch.item()
+                if isinstance(lm_num_items_in_batch, torch.Tensor):
+                    lm_num_items_in_batch = lm_num_items_in_batch.item()
+                # 未由 MTPTrainer 注入时回退为总有效 token 分母（旧行为）
+                mtp_den = mtp_num_items_in_batch if mtp_num_items_in_batch is not None else num_items_in_batch
+                lm_den = lm_num_items_in_batch if lm_num_items_in_batch is not None else num_items_in_batch
+
+                mtp_loss = (
+                    fixed_cross_entropy(
+                        mtp_logits.float(),
+                        mtp_labels.to(mtp_logits.device),
+                        num_items_in_batch=mtp_den,
+                        ignore_index=-100,
+                    )
+                    if mtp_labels.numel() > 0
+                    else zero_loss
+                )
+                lm_loss = (
+                    fixed_cross_entropy(
+                        safe_lm_logits.float(),
+                        safe_lm_labels.to(safe_lm_logits.device),
+                        num_items_in_batch=lm_den,
+                        ignore_index=-100,
+                    )
+                    if safe_lm_labels.numel() > 0
+                    else zero_loss
+                )
+
+                self._last_mtp_loss = mtp_loss.detach().item()
+                self._last_lm_loss = lm_loss.detach().item()
+
+                loss = self.lm_loss_weight * lm_loss + self.mtp_loss_weight * mtp_loss
+
+            else:
+                loss = self.loss_function(
+                    logits=logits,
+                    labels=labels,
+                    vocab_size=self.vocab_size,
+                    **loss_kwargs,
+                )
+                self._last_lm_loss = loss.detach().item()
+                self._last_mtp_loss = 0.0
 
         if not return_dict:
             output = (logits,) + outputs[1:]
@@ -1279,9 +1470,9 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
 @add_start_docstrings(
     """
-    The Qwen2 Model transformer with a sequence classification head on top (linear layer).
+    The Qwen3 Model transformer with a sequence classification head on top (linear layer).
 
-    [`Qwen2ForSequenceClassification`] uses the last token in order to do the classification, as other causal models
+    [`Qwen3ForSequenceClassification`] uses the last token in order to do the classification, as other causal models
     (e.g. GPT-2) do.
 
     Since it does classification on the last token, it requires to know the position of the last token. If a
@@ -1290,13 +1481,13 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     padding tokens when `inputs_embeds` are passed instead of `input_ids`, it does the same (take the last value in
     each row of the batch).
     """,
-    QWEN2_START_DOCSTRING,
+    QWEN3_START_DOCSTRING,
 )
-class Qwen2ForSequenceClassification(Qwen2PreTrainedModel):
+class Qwen3ForSequenceClassification(Qwen3PreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         self.num_labels = config.num_labels
-        self.model = Qwen2Model(config)
+        self.model = Qwen3Model(config)
         self.score = nn.Linear(config.hidden_size, self.num_labels, bias=False)
 
         # Initialize weights and apply final processing
@@ -1308,7 +1499,7 @@ class Qwen2ForSequenceClassification(Qwen2PreTrainedModel):
     def set_input_embeddings(self, value):
         self.model.embed_tokens = value
 
-    @add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(QWEN3_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -1402,17 +1593,17 @@ class Qwen2ForSequenceClassification(Qwen2PreTrainedModel):
 
 @add_start_docstrings(
     """
-    The Qwen2 Model transformer with a token classification head on top (a linear layer on top of the hidden-states
+    The Qwen3 Model transformer with a token classification head on top (a linear layer on top of the hidden-states
     output) e.g. for Named-Entity-Recognition (NER) tasks.
     """,
-    QWEN2_START_DOCSTRING,
+    QWEN3_START_DOCSTRING,
 )
-# Copied from transformers.models.llama.modeling_llama.LlamaForTokenClassification with Llama->Qwen2, LLAMA->QWEN2
-class Qwen2ForTokenClassification(Qwen2PreTrainedModel):
+# Copied from transformers.models.llama.modeling_llama.LlamaForTokenClassification with Llama->Qwen3, LLAMA->QWEN3
+class Qwen3ForTokenClassification(Qwen3PreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         self.num_labels = config.num_labels
-        self.model = Qwen2Model(config)
+        self.model = Qwen3Model(config)
         if getattr(config, "classifier_dropout", None) is not None:
             classifier_dropout = config.classifier_dropout
         elif getattr(config, "hidden_dropout", None) is not None:
@@ -1431,7 +1622,7 @@ class Qwen2ForTokenClassification(Qwen2PreTrainedModel):
     def set_input_embeddings(self, value):
         self.model.embed_tokens = value
 
-    @add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(QWEN3_INPUTS_DOCSTRING)
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=TokenClassifierOutput,
@@ -1491,19 +1682,19 @@ class Qwen2ForTokenClassification(Qwen2PreTrainedModel):
 
 @add_start_docstrings(
     """
-The Qwen2 Model transformer with a span classification head on top for extractive question-answering tasks like
+The Qwen3 Model transformer with a span classification head on top for extractive question-answering tasks like
 SQuAD (a linear layer on top of the hidden-states output to compute `span start logits` and `span end logits`).
     """,
-    QWEN2_START_DOCSTRING,
+    QWEN3_START_DOCSTRING,
 )
-# Copied from transformers.models.mistral.modeling_mistral.MistralForQuestionAnswering with Mistral->Qwen2, MISTRAL->QWEN2
-class Qwen2ForQuestionAnswering(Qwen2PreTrainedModel):
+# Copied from transformers.models.mistral.modeling_mistral.MistralForQuestionAnswering with Mistral->Qwen3, MISTRAL->QWEN3
+class Qwen3ForQuestionAnswering(Qwen3PreTrainedModel):
     base_model_prefix = "model"
 
-    # Copied from models.models.bloom.modeling_bloom.BloomForQuestionAnswering.__init__ with Bloom->Qwen2
+    # Copied from models.models.bloom.modeling_bloom.BloomForQuestionAnswering.__init__ with Bloom->Qwen3
     def __init__(self, config):
         super().__init__(config)
-        self.model = Qwen2Model(config)
+        self.model = Qwen3Model(config)
         self.qa_outputs = nn.Linear(config.hidden_size, 2)
 
         # Initialize weights and apply final processing
@@ -1515,7 +1706,7 @@ class Qwen2ForQuestionAnswering(Qwen2PreTrainedModel):
     def set_input_embeddings(self, value):
         self.model.embed_tokens = value
 
-    @add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(QWEN3_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,

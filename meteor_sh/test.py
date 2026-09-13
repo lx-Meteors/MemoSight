@@ -1,6 +1,6 @@
 from transformers import AutoTokenizer
 
-tokenizer = AutoTokenizer.from_pretrained("/mnt/zhaorunsong/models/Qwen2.5-0.5B-Instruct", trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained("/mnt/zhaorunsong/models/Qwen3-8B", trust_remote_code=True)
 
 separators = ['.', ',', '?', '!', ';', ':', ' ', '\t', '\n']
 

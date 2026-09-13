@@ -4,11 +4,11 @@ import argparse
 from typing import *
 from tqdm import tqdm
 from copy import deepcopy
-from transformers import Trainer, TrainingArguments
+from transformers import AutoConfig, Trainer, TrainingArguments
 
 from config import Config
 from tokenizer import Tokenizer
-from model_qwen import Qwen2ForCausalLM
+from model_qwen import Qwen3ForCausalLM
 from model_llama import LlamaForCausalLM
 from dataset import MyDataset, MyDataCollator
 from utils import _print, IGNORE_LABEL_ID, str2bool
@@ -74,18 +74,25 @@ def get_model_and_tokenizer(
     if args.model_type == 'llama':
         model_class = LlamaForCausalLM
     elif args.model_type == 'qwen':
-        model_class = Qwen2ForCausalLM
+        model_class = Qwen3ForCausalLM
+        tokenizer.validate_qwen3()
     else:
         assert False, "We only support llama and qwen model."
 
+    model_config = AutoConfig.from_pretrained(args.model_path, trust_remote_code=True)
+    if args.model_type == 'qwen' and model_config.model_type != "qwen3":
+        raise ValueError(
+            f"Expected a Qwen3 checkpoint, but `{args.model_path}` has "
+            f"model_type={model_config.model_type!r}."
+        )
     model = model_class.from_pretrained(
-        args.model_path, torch_dtype=torch.bfloat16
+        args.model_path, config=model_config, torch_dtype=torch.bfloat16
     )
 
     model.add_qkv(
-        q='q' in args.qkv,
-        k='k' in args.qkv,
-        v='v' in args.qkv,
+        q='q' in args.qkv or bool(getattr(model.config, "lightthinker_new_q", False)),
+        k='k' in args.qkv or bool(getattr(model.config, "lightthinker_new_k", False)),
+        v='v' in args.qkv or bool(getattr(model.config, "lightthinker_new_v", False)),
     )
 
     if model.model.config.vocab_size != len(tokenizer):

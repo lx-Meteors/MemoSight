@@ -51,7 +51,12 @@ from torch import nn
 # from .configuration_llama import LlamaConfig
 
 from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, DynamicCache, SepCache, StaticCache
+from transformers.cache_utils import Cache, DynamicCache, StaticCache
+
+try:
+    from .sep_cache_utils import SepCache
+except ImportError:
+    from sep_cache_utils import SepCache
 from transformers.generation import GenerationMixin
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 # from transformers.modeling_flash_attention_utils import _flash_attention_forward

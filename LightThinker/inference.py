@@ -8,15 +8,15 @@ import numpy as np
 from typing import *
 from tqdm import tqdm
 from copy import deepcopy
-from transformers import AutoTokenizer, DynamicCache, GenerationConfig,RepetitionPenaltyLogitsProcessor
+from transformers import AutoConfig, AutoTokenizer, DynamicCache, GenerationConfig,RepetitionPenaltyLogitsProcessor
 
 from LightThinker.utils import *
 from config import Config
 from tokenizer import Tokenizer
 from model_llama import LlamaForCausalLM
-from model_qwen import Qwen2ForCausalLM
+from model_qwen import Qwen3ForCausalLM
 from dataset_reader import GPQAReader, MMLUReader, BBHReader, GSM8KReader, Reader
-from transformers.cache_utils import SepCache
+from sep_cache_utils import SepCache
 
 DEBUG:bool=False
 BLOCK:bool=False
@@ -592,15 +592,15 @@ class KVUtils:
     KV Cache Manager
     """
 
-    def __init__(self):
+    def __init__(self, tokenizer: Tokenizer, model):
         self.past_key_values: SepCache = SepCache(
             init_cache_size=384,
             sep_cache_size=64,
             local_size=256,
             cache_size=1024,
-            separator_token_ids=[13, 11, 30, 0, 26, 25, 220, 197, 198],
-            PADDING_ID=151643,
-            layer_num=28,
+            separator_token_ids=tokenizer.get_separator_token_ids(),
+            PADDING_ID=tokenizer.pad_token_id,
+            layer_num=model.config.num_hidden_layers,
             APPLY_PES_INSIDE=False,
         )
 
@@ -807,7 +807,7 @@ class TokenUtils:
 # ========== CORE CODE ==========
 @torch.no_grad()
 def _prefill_wo_prompt_compression(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     system_prompt:str,
@@ -850,21 +850,10 @@ def _prefill_wo_prompt_compression(
             end_offset=None,
             file_name="debug_global.png",
         )
-    from transformers.cache_utils import SepCache
-    past_key_values = SepCache(
-        init_cache_size=384,
-        sep_cache_size=64,
-        local_size=256,
-        cache_size=1024,
-        separator_token_ids=[13, 11, 30, 0, 26, 25, 220, 197, 198],
-        PADDING_ID=tokenizer.pad_token_id,
-        layer_num=model.config.num_hidden_layers,
-        APPLY_PES_INSIDE=False,
-    )
     # 3. model.forward()
     model_output = model(
         input_ids=torch.as_tensor(
-            [input_ids], device="cuda"
+            [input_ids], device=token_utils.input_ids.device
         ),
         use_cache=True,
         past_key_values=past_key_values,
@@ -880,7 +869,7 @@ def _prefill_wo_prompt_compression(
     
 @torch.no_grad()
 def _prefill_w_prompt_compression(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     question:str,
@@ -1070,7 +1059,7 @@ def _prefill_w_prompt_compression(
     # 3. forward
     model_output = model(
         input_ids=torch.as_tensor(
-            [input_ids], device="cuda"
+            [input_ids], device=token_utils.input_ids.device
         ),
         attention_mask=attention_mask,
         past_key_values=past_key_values,
@@ -1114,7 +1103,7 @@ def _prefill_w_prompt_compression(
 
 @torch.no_grad()
 def prefill(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     question:str,
@@ -1174,7 +1163,7 @@ def prefill(
 
 @torch.no_grad()
 def _token_level_generate(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     max_new_tokens: int,
@@ -1332,7 +1321,7 @@ def _token_level_generate(
 
 @torch.no_grad()
 def _sentence_level_generate(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     max_new_tokens: int,
@@ -1495,18 +1484,6 @@ def _sentence_level_generate(
 
         # 3. generate new token(本来对这里有疑问的，为什么attention_mask是全0？因为当前只传入了一个token，前面的是kvcache，所以前面正常应该都能看到？
         # 突然看到非压缩时indicator都是None，貌似合理了)
-        from transformers.cache_utils import SepCache
-        # past_key_values = SepCache(
-        #     init_cache_size=4,
-        #     sep_cache_size=128,
-        #     local_size=256,
-        #     cache_size=512,
-        #     separator_token_ids=[13, 11, 30, 0, 26, 25, 220, 197, 198],
-        #     PADDING_ID=151643,
-        #     layer_num=28,
-        #     model_type="qwen",
-        #     device=input_ids.device
-        # )
         model_output = model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -1541,7 +1518,7 @@ def _sentence_level_generate(
 # 260309 尚未验证traditional mtp的推理准确性，最差情况与标准推理一致
 @torch.no_grad()
 def _sentence_mtp_level_generate(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     max_new_tokens: int,
@@ -1880,7 +1857,7 @@ def mtp_generate_and_validate(model, last_hidden_state, input_ids, attention_mas
 # 导致某些位置（例如 to 和 for）logit差异过小而选择了不同的token
 @torch.no_grad()
 def _sentence_level_mtp_register_generate(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     max_new_tokens: int,
@@ -2231,7 +2208,7 @@ def _sentence_level_mtp_register_generate(
 
 @torch.no_grad()
 def generate(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     question:str,
@@ -2252,7 +2229,7 @@ def generate(
 ) -> Tuple[str,str]:
 
     assert update_attention_method in ['global', 'local'], update_attention_method
-    kv_utils = KVUtils()
+    kv_utils = KVUtils(tokenizer, model)
 
     # 1. prefill
     predicted_token_id, last_hidden_state, past_key_values = prefill(
@@ -2271,6 +2248,7 @@ def generate(
         token_utils=token_utils,
         repetition_penalty=repetition_penalty
     )
+    kv_utils.set_cache(past_key_values)
 
     # 2. auto-regressive generation
     if comp_config.output_comp_level == 'token':
@@ -2405,7 +2383,7 @@ def get_model_and_tokenizer(
     args, 
     comp_config:Config
 ) -> Tuple[
-    Union[Qwen2ForCausalLM, LlamaForCausalLM],
+    Union[Qwen3ForCausalLM, LlamaForCausalLM],
     Tokenizer
 ]:
     if args.model_path == None or args.model_path == "":
@@ -2429,8 +2407,16 @@ def get_model_and_tokenizer(
         tokenizer.add_special_token(special_token_list)
 
     if args.model_type.lower() == 'qwen':
-        model = Qwen2ForCausalLM.from_pretrained(
-            model_path, torch_dtype=torch.bfloat16, device_map="auto"
+        tokenizer.validate_qwen3()
+        model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        if model_config.model_type != "qwen3":
+            raise ValueError(
+                f"Expected a Qwen3 checkpoint, but `{model_path}` has "
+                f"model_type={model_config.model_type!r}."
+            )
+        model = Qwen3ForCausalLM.from_pretrained(
+            model_path, config=model_config, torch_dtype=torch.bfloat16,
+            device_map="auto", attn_implementation="sdpa",
         )
     elif args.model_type.lower() == 'llama':
         model = LlamaForCausalLM.from_pretrained(
@@ -2443,7 +2429,7 @@ def get_model_and_tokenizer(
 
 @torch.no_grad()
 def eval_dataset(
-    model:Union[Qwen2ForCausalLM, LlamaForCausalLM],
+    model:Union[Qwen3ForCausalLM, LlamaForCausalLM],
     tokenizer:Tokenizer,
     reader:Reader,
     comp_config:Config,

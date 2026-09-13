@@ -4,7 +4,11 @@ import json
 from tqdm import tqdm
 
 import sys
-sys.path.append('../LightThinker')
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT / "LightThinker"))
 from dataset_reader import DISTILLReader, GPQAReader, Reader, MMLUReader, BBHReader, GSM8KReader
 import os
 
@@ -14,7 +18,7 @@ def bbh():
     ]
 
     for reader, name in reader_map_list:
-        with jsonlines.open(f"./data/eval/{name}.jsonl", "w") as writer:
+        with jsonlines.open(PROJECT_ROOT / f"data/eval/{name}.jsonl", "w") as writer:
             for i in range(len(reader)):
                 answer = str(reader.data_list[i]['answer'])
                 alias = [str(reader.data_list[i]['answer']), "\\text{" + reader.data_list[i]['answer'] + "}"]
@@ -80,7 +84,7 @@ def mmlu():
     ]
 
     for reader, name in reader_map_list:
-        with jsonlines.open(f"./data/eval/{name}.jsonl", "w") as writer:
+        with jsonlines.open(PROJECT_ROOT / f"data/eval/{name}.jsonl", "w") as writer:
             for i in range(len(reader)):
                 answer = str(reader.data_list[i]['answer'])
                 alias = [str(reader.data_list[i]['answer']), "\\text{" + reader.data_list[i]['answer'] + "}"]
@@ -112,7 +116,7 @@ def gpqa():
     ]
 
     for reader, name in reader_map_list:
-        with jsonlines.open(f"./data/eval/{name}.jsonl", "w") as writer:
+        with jsonlines.open(PROJECT_ROOT / f"data/eval/{name}.jsonl", "w") as writer:
             for i in range(len(reader)):
                 answer = str(reader.data_list[i]['answer'])
                 alias = [str(reader.data_list[i]['answer']), "\\text{" + reader.data_list[i]['answer'] + "}"]
@@ -145,11 +149,10 @@ if __name__ == '__main__':
         (MMLUReader(), "mmlu"),
         (BBHReader(), "bbh"),
         (GSM8KReader(), "gsm8k"),
-        (DISTILLReader(), "distill")
     ]
 
     for reader, name in reader_map_list:
-        with jsonlines.open(f"./data/eval/{name}.jsonl", "w") as writer:
+        with jsonlines.open(PROJECT_ROOT / f"data/eval/{name}.jsonl", "w") as writer:
         # with jsonlines.open(f"./data/eval_demo/{name}.jsonl", "w") as writer:
             for i in range(len(reader)):
                 writer.write(dict(
@@ -164,7 +167,6 @@ if __name__ == '__main__':
     mmlu()
     gpqa()
     bbh()
-
 
 
 

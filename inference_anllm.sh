@@ -9,7 +9,7 @@ model_tag=""
 model_short_tag=""
 
 model_type="qwen"
-tokenizer_path="Qwen/Qwen2.5-7B-Instruct"
+tokenizer_path="Qwen/Qwen3-8B"
 bos_token="<|im_start|>"
 eos_token="<|im_end|>"
 compress_config="./configs/AnLLM/qwen/v1.json"

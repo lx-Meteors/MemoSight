@@ -1,7 +1,7 @@
 
 # ==================== 通过命令行传入必要超参数 ====================
 # 使用方法: ./script.sh [model_tag] [repetition_penalty] [ckpt] [root_dir] [output_base_dir] [tokenizer_path]
-# 示例: ./script.sh "lightthinker" "1.1" "1305" "./LightThinker" "/tmp/hx/rrcot" "/tmp/hx/Qwen/Qwen2.5-1.5B-Instruct"
+# 示例: ./script.sh "lightthinker" "1.1" "1305" "./LightThinker" "/tmp/hx/rrcot" "/tmp/hx/Qwen/Qwen3-8B"
 
 # 检查必需参数（至少需要6个：model_tag, repetition_penalty, ckpt, root_dir, output_base_dir, tokenizer_path）
 if [ $# -lt 6 ]; then
@@ -13,7 +13,7 @@ if [ $# -lt 6 ]; then
     echo "  root_dir: 必需，代码根目录"
     echo "  output_base_dir: 必需，输出基础目录"
     echo "  tokenizer_path: 必需，tokenizer路径"
-    echo "示例: $0 \"lightthinker\" \"1.1\" \"1305\" \"/zhaorunsong/RRcot/LightThinker\" \"/tmp/hx/rrcot\" \"/tmp/hx/Qwen/Qwen2.5-1.5B-Instruct\""
+    echo "示例: $0 \"lightthinker\" \"1.1\" \"1305\" \"/zhaorunsong/RRcot/LightThinker\" \"/tmp/hx/rrcot\" \"/tmp/hx/Qwen/Qwen3-8B\""
     exit 1
 fi
 
