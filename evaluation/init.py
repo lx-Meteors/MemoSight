@@ -4,7 +4,11 @@ import json
 from tqdm import tqdm
 
 import sys
-sys.path.append('../LightThinker')
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT / "LightThinker"))
 from dataset_reader import DISTILLReader, GPQAReader, Reader, MMLUReader, BBHReader, GSM8KReader
 import os
 
@@ -14,7 +18,7 @@ def bbh():
     ]
 
     for reader, name in reader_map_list:
-        with jsonlines.open(f"./data/eval/{name}.jsonl", "w") as writer:
+        with jsonlines.open(PROJECT_ROOT / f"data/eval/{name}.jsonl", "w") as writer:
             for i in range(len(reader)):
                 answer = str(reader.data_list[i]['answer'])
                 alias = [str(reader.data_list[i]['answer']), "\\text{" + reader.data_list[i]['answer'] + "}"]
@@ -22,13 +26,13 @@ def bbh():
                 if answer.lower() == 'yes':
                     alias.extend(['Yes', 'yes', r'\text{yes}', r'\text{Yes}', 'A'])
                     error.extend(['No', 'no', r'\text{No}', r'\text{no}', 'B'])
-                elif answer.lower() == 'no':    
+                elif answer.lower() == 'no':
                     alias.extend(['No', 'no', r'\text{No}', r'\text{no}', 'B'])
                     error.extend(['Yes', 'yes', r'\text{yes}', r'\text{Yes}', 'A'])
                 if answer.lower() == 'true':
                     alias.extend(['True', 'true', r'\text{true}', r'\text{True}'])
                     error.extend(['False', 'false', r'\text{false}', r'\text{False}'])
-                elif answer.lower() == 'false':    
+                elif answer.lower() == 'false':
                     alias.extend(['False', 'false', r'\text{false}', r'\text{False}'])
                     error.extend(['True', 'true', r'\text{true}', r'\text{True}'])
 
@@ -38,7 +42,7 @@ def bbh():
                 elif answer.lower() == 'invalid':
                     error.extend(['valid', 'Valid', r'\text{valid}', r'\text{Valid}'])
                     alias.extend(['Invalid', 'invalid', r'\text{invalid}', r'\text{Invalid}'])
-                
+
                 if answer == 'A':
                     error.extend(['B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'])
                 elif answer == 'B':
@@ -61,7 +65,7 @@ def bbh():
                     error.extend(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K'])
                 elif answer == 'K':
                     error.extend(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'])
-                
+
                 alias = list(set(alias))
                 error = list(set(error))
 
@@ -80,7 +84,7 @@ def mmlu():
     ]
 
     for reader, name in reader_map_list:
-        with jsonlines.open(f"./data/eval/{name}.jsonl", "w") as writer:
+        with jsonlines.open(PROJECT_ROOT / f"data/eval/{name}.jsonl", "w") as writer:
             for i in range(len(reader)):
                 answer = str(reader.data_list[i]['answer'])
                 alias = [str(reader.data_list[i]['answer']), "\\text{" + reader.data_list[i]['answer'] + "}"]
@@ -93,7 +97,7 @@ def mmlu():
                     error.extend(['A', 'B', 'D'])
                 elif answer == 'D':
                     error.extend(['A', 'B', 'C'])
-                
+
                 alias = list(set(alias))
                 error = list(set(error))
 
@@ -112,7 +116,7 @@ def gpqa():
     ]
 
     for reader, name in reader_map_list:
-        with jsonlines.open(f"./data/eval/{name}.jsonl", "w") as writer:
+        with jsonlines.open(PROJECT_ROOT / f"data/eval/{name}.jsonl", "w") as writer:
             for i in range(len(reader)):
                 answer = str(reader.data_list[i]['answer'])
                 alias = [str(reader.data_list[i]['answer']), "\\text{" + reader.data_list[i]['answer'] + "}"]
@@ -125,7 +129,7 @@ def gpqa():
                     error.extend(['A', 'B', 'D'])
                 elif answer == 'D':
                     error.extend(['A', 'B', 'C'])
-                
+
                 alias = list(set(alias))
                 error = list(set(error))
 
@@ -145,11 +149,10 @@ if __name__ == '__main__':
         (MMLUReader(), "mmlu"),
         (BBHReader(), "bbh"),
         (GSM8KReader(), "gsm8k"),
-        (DISTILLReader(), "distill")
     ]
 
     for reader, name in reader_map_list:
-        with jsonlines.open(f"./data/eval/{name}.jsonl", "w") as writer:
+        with jsonlines.open(PROJECT_ROOT / f"data/eval/{name}.jsonl", "w") as writer:
         # with jsonlines.open(f"./data/eval_demo/{name}.jsonl", "w") as writer:
             for i in range(len(reader)):
                 writer.write(dict(
@@ -160,11 +163,10 @@ if __name__ == '__main__':
                     alias=[str(reader.data_list[i]['answer']), "\\text{" + reader.data_list[i]['answer'] + "}"],
                     error=['error'],
                 ))
-    
+
     mmlu()
     gpqa()
     bbh()
-
 
 
 

@@ -18,7 +18,7 @@ class Config:
         prompt:Dict,
         output:Dict,
         share:bool=True,
-    ): 
+    ):
         self.share:bool = share
         self.template_cfg:Dict = template
         self.prompt_cfg:Dict = prompt
@@ -40,7 +40,7 @@ class Config:
         self.prompt_comp_token_desp_template = self.prompt_cfg['token_desp']
 
         # assert self.prompt_comp_level in ['']
-        
+
         self.output_comp_step:int = self.output_cfg['step']
         self.output_comp_level:bool = self.output_cfg['level']
         self.output_comp_n_token:int = self.output_cfg['n_token']
@@ -102,8 +102,8 @@ class Config:
         self.register_token_id:int = None
 
         self.special_token_name_list:List[str] = [
-            self.split_token, 
-            self.continue_token, 
+            self.split_token,
+            self.continue_token,
             self.recover_token,
             self.begin_thought_token,
             self.end_thought_token,
@@ -113,7 +113,7 @@ class Config:
             self.register_token
         ]
         self.special_token_desp_list:List[str] = [
-            self.split_token_desp, 
+            self.split_token_desp,
             self.continue_token_desp,
             self.recover_token_desp,
             self.begin_thought_token_desp,
@@ -124,7 +124,7 @@ class Config:
             self.register_token_desp
         ]
 
-        # 为qwen2.5
+        # 为qwen3
         if self.template_cfg['model'] == 'qwen':
             self.bos_token = "<|im_start|>"
             self.bos_token_desp = "<|im_start|>"
@@ -214,7 +214,7 @@ class Config:
 
     def get_output_comp_token(self, return_list:bool=False) -> Union[str, List[str]]:
         return self.output_comp_token_name_list if return_list else "".join(self.output_comp_token_name_list)
-    
+
 
     def get_adaptive_output_comp_token(self, tokenizer, thought) -> Union[str, List[str]]:
         thought_ids = tokenizer.encode_plus(thought,add_special_tokens=False)["input_ids"]
@@ -250,5 +250,5 @@ class Config:
             return comp_tokens
         else:
             return self.output_comp_token_id_list
-    
+
 

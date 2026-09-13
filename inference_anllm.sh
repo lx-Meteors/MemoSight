@@ -1,15 +1,15 @@
 # we will load model from `output/{model_tag}/checkpoint-{args.ckpt}`
 
-# `model_tag` is the filename under the output/ folder, 
+# `model_tag` is the filename under the output/ folder,
 # corresponding to line 1378 of the code in AnLLM/inference.py.
 model_tag=""
 
-# `model_short_tag` is used to save file, 
+# `model_short_tag` is used to save file,
 # corresponding to line 1612 of the code in LightThinker/inference.py.
 model_short_tag=""
 
 model_type="qwen"
-tokenizer_path="Qwen/Qwen2.5-7B-Instruct"
+tokenizer_path="Qwen/Qwen3-8B"
 bos_token="<|im_start|>"
 eos_token="<|im_end|>"
 compress_config="./configs/AnLLM/qwen/v1.json"
@@ -31,7 +31,7 @@ prefill_compress="false"
 update_attention_method="local"
 temp_tag=""
 
-# check "anllm_infer_log" 
+# check "anllm_infer_log"
 if [ ! -d "anllm_infer_log" ]; then
     echo "Creating anllm_infer_log directory..."
     mkdir anllm_infer_log
@@ -69,7 +69,7 @@ CUDA_VISIBLE_DEVICES=0 nohup python "${root_dir}/inference.py" \
     --split_size $split_size \
     --model_short_tag $model_short_tag \
     --index $index > "anllm_infer_log/${rolling_rope}_${compress_prompt}/${temp_tag}${index}_${model_short_tag}_${ckpt}.txt" 2>&1 &
-    
+
 index=2
 CUDA_VISIBLE_DEVICES=1 nohup python "${root_dir}/inference.py" \
     --model_tag $model_tag \
@@ -93,7 +93,7 @@ CUDA_VISIBLE_DEVICES=1 nohup python "${root_dir}/inference.py" \
     --split_size $split_size \
     --model_short_tag $model_short_tag \
     --index $index > "anllm_infer_log/${rolling_rope}_${compress_prompt}/${temp_tag}${index}_${model_short_tag}_${ckpt}.txt" 2>&1 &
-   
+
 index=3
 CUDA_VISIBLE_DEVICES=2 nohup python "${root_dir}/inference.py" \
     --model_tag $model_tag \
@@ -117,7 +117,7 @@ CUDA_VISIBLE_DEVICES=2 nohup python "${root_dir}/inference.py" \
     --split_size $split_size \
     --model_short_tag $model_short_tag \
     --index $index > "anllm_infer_log/${rolling_rope}_${compress_prompt}/${temp_tag}${index}_${model_short_tag}_${ckpt}.txt" 2>&1 &
-   
+
 index=4
 CUDA_VISIBLE_DEVICES=3 nohup python "${root_dir}/inference.py" \
     --model_tag $model_tag \
@@ -141,4 +141,4 @@ CUDA_VISIBLE_DEVICES=3 nohup python "${root_dir}/inference.py" \
     --split_size $split_size \
     --model_short_tag $model_short_tag \
     --index $index > "anllm_infer_log/${rolling_rope}_${compress_prompt}/${temp_tag}${index}_${model_short_tag}_${ckpt}.txt" 2>&1 &
-   
+

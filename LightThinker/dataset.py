@@ -1,6 +1,6 @@
 
 import torch
-import torch.distributed as dist 
+import torch.distributed as dist
 from typing import List, Dict, Tuple, Union, Optional
 from tqdm import tqdm
 from copy import deepcopy
@@ -39,19 +39,19 @@ class MyDataset(torch.utils.data.Dataset):
         self.config:Config = config
         self.tokenizer:Tokenizer = tokenizer
         self.padding_config:Dict = padding_config
-        
+
         # upper bound
         self.normal_data:List[Dict] = list()
         self.aug_data:List[Dict] = list()
         self.recover_data:List[Dict] = list()
-        self.recover_prompt_data:List[Dict] = list()    
-        self.aug_data_wo_prompt_comp:List[Dict] = list()    
+        self.recover_prompt_data:List[Dict] = list()
+        self.aug_data_wo_prompt_comp:List[Dict] = list()
         self.aug_data_wo_prompt_comp_apa_mtp:List[Dict] = list()
 
         self.output_compress_instruction:str = output_compress_instruction if output_compress_instruction != None else ""
 
         self.use_EPL = use_EPL
-        
+
         # 1. 获取当前进程的 Rank (如果是单卡运行，默认 Rank 为 0)
         self.local_rank = local_rank
 
@@ -61,7 +61,7 @@ class MyDataset(torch.utils.data.Dataset):
                 # 只有主进程创建目录，防止冲突
                 if self.local_rank == 0:
                     os.makedirs(cache_dir, exist_ok=True)
-            
+
             self.cache_path = os.path.join(cache_dir, cache_filename)
 
             if use_EPL:
@@ -80,13 +80,13 @@ class MyDataset(torch.utils.data.Dataset):
             # 只有 Rank 0 才有资格决定是否需要“重新处理并写入”
             if self.local_rank == 0:
                 should_process = not os.path.exists(self.cache_path) or force_preprocess
-                 
+
                 if should_process:
                     print(f"[Rank {self.local_rank}] Cache not found or forced. Processing data...")
                     try:
                         self.init()
                         self.init_for_aug_data_wo_pc()
-                        
+
                         print(f"[Rank {self.local_rank}] Saving cache to {self.cache_path}...")
                         # 保存数据到临时文件，然后原子性重命名
                         cache_data = {
@@ -97,12 +97,12 @@ class MyDataset(torch.utils.data.Dataset):
                             'aug_wo_pc': self.aug_data_wo_prompt_comp,
                             'aug_register_mtp': self.aug_data_wo_prompt_comp_apa_mtp
                         }
-                        
+
                         # 使用临时文件 + 重命名，避免其他进程读到不完整的文件
                         temp_cache_path = self.cache_path + '.tmp'
                         # torch.save(cache_data, temp_cache_path)
                         # os.rename(temp_cache_path, self.cache_path)
-                        
+
                         print(f"[Rank {self.local_rank}] Cache saved!")
                         data_in_memory = True
                     except Exception as e:
@@ -110,7 +110,7 @@ class MyDataset(torch.utils.data.Dataset):
                         raise
                 else:
                     print(f"[Rank {self.local_rank}] Cache found at {self.cache_path}.")
-            
+
             # 4. 关键：同步屏障 (Barrier)
             # 所有的进程（Rank 0, 1, 2...）都会运行到这里。
             # 如果 Rank 0 还在上面处理数据，其他进程会在这里死等，直到 Rank 0 跑完并执行到这里。
@@ -123,7 +123,7 @@ class MyDataset(torch.utils.data.Dataset):
                 print(f"[Rank {self.local_rank}] Passed barrier!")
             else:
                 print(f"[Rank {self.local_rank}] WARNING: dist not initialized!")
-                    
+
             # 5. 加载数据
             # 如果我是 Rank 0 且刚才已经处理过(data_in_memory=True)，就不用读了，省一次 IO。
             # 否则（我是 Rank > 0，或者我是 Rank 0 但发现文件早就存在没经过处理），都需要读取文件。
@@ -138,14 +138,14 @@ class MyDataset(torch.utils.data.Dataset):
                         f"[Rank {self.local_rank}] Cache file not found: {self.cache_path}\n"
                         f"This usually means Rank 0 failed to save the cache."
                     )
-                
+
                 try:
                     cached_data = torch.load(
-                        self.cache_path, 
-                        map_location='cpu', 
+                        self.cache_path,
+                        map_location='cpu',
                         weights_only=False
                     )
-                    
+
                     self.normal_data = cached_data['normal']
                     self.aug_data = cached_data['aug']
                     self.recover_data = cached_data['recover']
@@ -156,12 +156,12 @@ class MyDataset(torch.utils.data.Dataset):
                 except Exception as e:
                     print(f"[Rank {self.local_rank}] ERROR loading cache: {e}")
                     raise
-        
+
         else:
             # 如果没配置缓存路径，就像以前一样各自跑（不推荐）
             self.init()
             self.init_for_aug_data_wo_pc()
-    
+
     #token level，感觉没用到
     def insert_comp_for_output(self, output:str) -> Tuple[List[str], List[List[int]]]:
         assert self.config.output_comp_level == 'token'
@@ -172,7 +172,7 @@ class MyDataset(torch.utils.data.Dataset):
         indicator_list:List[str] = list()
         step = self.config.output_comp_step
 
-        comp_cnt = len(output_input_ids) // step 
+        comp_cnt = len(output_input_ids) // step
         for i in range(comp_cnt):
             input_ids_list.append(
                 output_input_ids[i*step: (i+1)*step]
@@ -193,16 +193,16 @@ class MyDataset(torch.utils.data.Dataset):
         return indicator_list, input_ids_list
 
     def insert_comp_for_prompt(
-        self, 
-        question:str, 
-        question_list:List[str], 
-        system_prompt:str, 
+        self,
+        question:str,
+        question_list:List[str],
+        system_prompt:str,
         system_prompt_list:List[str]
     ) -> Tuple[
         List[str],
         List[List[int]]
-        # Union[NoneType, List[int]], 
-        # List[int], 
+        # Union[NoneType, List[int]],
+        # List[int],
         # Union[NoneType, List[int]]
     ]:
         prefix_input_ids = None
@@ -247,7 +247,7 @@ class MyDataset(torch.utils.data.Dataset):
                 if prefix_input_ids != None:
                     indicator_list.append("save")
                     input_ids_list.append(prefix_input_ids)
-                
+
                 # ub = 0
                 for i in range(0, len(system_input_ids), step):
                     # ub = i+step
@@ -290,7 +290,7 @@ class MyDataset(torch.utils.data.Dataset):
                     system_prompt_input_ids_list.append(
                         self.tokenizer.tokenizer(s, return_tensors=None, add_special_tokens=False)['input_ids']
                     )
-                
+
                 sentence_input_ids_list:List[List[int]] = system_prompt_input_ids_list + question_input_ids_list
                 for i in range(0, len(sentence_input_ids_list)):
                     indicator_list.append("abandoned")
@@ -310,27 +310,27 @@ class MyDataset(torch.utils.data.Dataset):
                 if prefix_input_ids != None:
                     indicator_list.append("save")
                     input_ids_list.append(prefix_input_ids)
-                
+
                 for i in range(0, len(system_prompt_input_ids_list)):
                     indicator_list.append("abandoned")
                     input_ids_list.append(system_prompt_input_ids_list[i])
                     indicator_list.append("compressed-prompt")
                     input_ids_list.append(self.config.get_prompt_comp_token_id())
-                
+
                 if middle_input_ids != None:
                     indicator_list.append("save")
                     input_ids_list.append(middle_input_ids)
-                
+
                 for i in range(0, len(question_input_ids_list)):
                     indicator_list.append("abandoned")
                     input_ids_list.append(question_input_ids_list[i])
                     indicator_list.append("compressed-prompt")
                     input_ids_list.append(self.config.get_prompt_comp_token_id())
-                
+
                 if suffix_input_ids != None:
                     indicator_list.append("save")
                     input_ids_list.append(suffix_input_ids)
-        
+
         assert len(indicator_list) == len(input_ids_list)
         return indicator_list, input_ids_list
 
@@ -369,7 +369,7 @@ class MyDataset(torch.utils.data.Dataset):
                     self.tokenizer.bos_token + self.config.template_cfg['complete'].format(system=system_prompt, question=question),
                     gt_output + self.tokenizer.eos_token
                 ]
-                
+
             self.normal_data.append(
                 dict(
                     tokenized=self.tokenizer.normal_data_tokenize(
@@ -386,7 +386,7 @@ class MyDataset(torch.utils.data.Dataset):
             structured_input:List[List] = list()
             structured_input_indicator:List[List[str]] = list()
             mask_label_map:Dict = dict()
-            
+
             mask_label_map[self.config.recover_token_id] = IGNORE_LABEL_ID
             mask_label_map[self.config.continue_token_id] = IGNORE_LABEL_ID
             for token_id in self.config.get_output_comp_token_id():
@@ -396,12 +396,12 @@ class MyDataset(torch.utils.data.Dataset):
 
             # 1. insert prompt
             prompt_indicator_list, prompt_input_ids_list = self.insert_comp_for_prompt(
-                question=question, question_list=question_list, 
+                question=question, question_list=question_list,
                 system_prompt=system_prompt, system_prompt_list=system_prompt_list
             )
             structured_input.append(prompt_input_ids_list)          # [n_turn, n_sent, n_token_per_sent]
             structured_input_indicator.append(prompt_indicator_list)    # [n_turn, n_sent]
-            
+
             #AE任务的重建数据
             # 1.1 recover prompt part
             assert len(prompt_input_ids_list) == len(prompt_indicator_list)
@@ -414,7 +414,7 @@ class MyDataset(torch.utils.data.Dataset):
             _, recover_prompt_item = self.tokenizer.aug_data_tokenize(
                 structured_input=structured_input + [[recover_prompt_input_ids]],
                 structured_input_indicator=structured_input_indicator + [["save"]],
-                n_comp_for_prompt=self.config.prompt_comp_n_token,  
+                n_comp_for_prompt=self.config.prompt_comp_n_token,
                 n_continue_for_prompt=0,
                 n_comp_for_output=self.config.output_comp_n_token,
                 n_continue_for_output=1,
@@ -430,7 +430,7 @@ class MyDataset(torch.utils.data.Dataset):
                     tokenized=recover_prompt_item,
                 )
             )
-            
+
 
             # 2. output part
             if self.config.output_comp_level == 'token':
@@ -449,14 +449,14 @@ class MyDataset(torch.utils.data.Dataset):
                 if add_eos:
                     output_indicator_list.append("save")
                     output_content_list.append(self.tokenizer.eos_token)
-            
+
             structured_input.append(output_content_list)
             structured_input_indicator.append(output_indicator_list)
 
             recover_item, aug_item = self.tokenizer.aug_data_tokenize(
                 structured_input=structured_input,
                 structured_input_indicator=structured_input_indicator,
-                n_comp_for_prompt=self.config.prompt_comp_n_token,  
+                n_comp_for_prompt=self.config.prompt_comp_n_token,
                 n_continue_for_prompt=0,
                 n_comp_for_output=self.config.output_comp_n_token,
                 n_continue_for_output=1,
@@ -476,7 +476,7 @@ class MyDataset(torch.utils.data.Dataset):
                 recover_item
             )
             pbar.update(1)
-    
+
     # 不压缩prompt
     def init_for_aug_data_wo_pc(self, system_compression: bool=False):
         pbar = tqdm(total=len(self.meta_data))
@@ -546,14 +546,14 @@ class MyDataset(torch.utils.data.Dataset):
                 if add_eos:
                     output_indicator_list.append("save")
                     output_content_list.append(self.tokenizer.eos_token)
-            
+
             structured_input.append(output_content_list)
             structured_input_indicator.append(output_indicator_list)
 
             recover_item, aug_item = self.tokenizer.aug_data_tokenize(
                 structured_input=structured_input,
                 structured_input_indicator=structured_input_indicator,
-                n_comp_for_prompt=self.config.prompt_comp_n_token,  
+                n_comp_for_prompt=self.config.prompt_comp_n_token,
                 n_continue_for_prompt=0,
                 n_comp_for_output=self.config.output_comp_n_token,
                 n_continue_for_output=1,
@@ -576,7 +576,7 @@ class MyDataset(torch.utils.data.Dataset):
             recover_item, aug_item_register_mtp = self.tokenizer.aug_data_tokenize_apa_mtp(
                 structured_input=structured_input,
                 structured_input_indicator=structured_input_indicator,
-                n_comp_for_prompt=self.config.prompt_comp_n_token,  
+                n_comp_for_prompt=self.config.prompt_comp_n_token,
                 n_continue_for_prompt=0,
                 n_comp_for_output=self.config.output_comp_n_token,
                 n_continue_for_output=1,
@@ -606,18 +606,18 @@ class MyDataset(torch.utils.data.Dataset):
             self.aug_data_wo_prompt_comp[idx],
             self.aug_data_wo_prompt_comp_apa_mtp[idx]
         )
-    
+
     def __len__(self) -> int:
         return len(self.normal_data)
-    
+
     def clean_cache(self):
         if self.cache_file and os.path.exists(self.cache_file):
             os.remove(self.cache_file)
-    
+
 class MyDataCollator:
 
     def __init__(
-        self, 
+        self,
         dataset:MyDataset,
         attention_config:Dict,
         exclude_continue:bool,
@@ -632,7 +632,7 @@ class MyDataCollator:
         )
         sample_config:dict(
             mode:str in [aug, normal]
-            hybrid:bool=False,      
+            hybrid:bool=False,
         )
         """
         self.dataset:MyDataset = dataset
@@ -650,21 +650,21 @@ class MyDataCollator:
             new_item = padding_item(
                 item=normal_data['tokenized'],
                 padding_side=self.dataset.padding_config['padding_side'],
-                label_padding_id=self.dataset.padding_config['label_padding_id'], 
-                input_padding_id=self.dataset.padding_config['input_padding_id'], 
-                max_length=self.dataset.padding_config['max_length'], 
+                label_padding_id=self.dataset.padding_config['label_padding_id'],
+                input_padding_id=self.dataset.padding_config['input_padding_id'],
+                max_length=self.dataset.padding_config['max_length'],
                 position_ids_padding_id=self.dataset.padding_config['position_ids_padding_id']
             )
             # print(new_item['input_ids'])
             final['input_ids'].append(new_item['input_ids'])
             final['labels'].append(new_item['labels'])
-        
+
         # print(final['input_ids'])
         return dict(
             input_ids=torch.as_tensor(final['input_ids']),
             labels=torch.as_tensor(final['labels']),
         )
-            
+
     def _aug_mode(self, instances:List[Tuple]) -> Dict:
         final = dict(
             input_ids=list(),
@@ -698,9 +698,9 @@ class MyDataCollator:
             new_item = padding_item(
                 item=aug_data['tokenized'],
                 padding_side=self.dataset.padding_config['padding_side'],
-                label_padding_id=self.dataset.padding_config['label_padding_id'], 
-                input_padding_id=self.dataset.padding_config['input_padding_id'], 
-                max_length=self.dataset.padding_config['max_length'], 
+                label_padding_id=self.dataset.padding_config['label_padding_id'],
+                input_padding_id=self.dataset.padding_config['input_padding_id'],
+                max_length=self.dataset.padding_config['max_length'],
                 position_ids_padding_id=self.dataset.padding_config['position_ids_padding_id']
             )
             final['input_ids'].append(new_item['input_ids'])
@@ -714,7 +714,7 @@ class MyDataCollator:
                     [end+l_inst+i for i in range(n_comp)]
                 )
                 final['row_comp_index'].extend([bsz_id] * n_comp)
-        
+
         return dict(
             input_ids=torch.as_tensor(
                 final['input_ids']
@@ -736,9 +736,9 @@ class MyDataCollator:
                 final['column_comp_index']
             ),
         )
-            
+
     def _recover_mode(self, instances:List[Tuple]) -> Dict:
-        
+
         final = dict(
             input_ids=list(),
             labels=list(),
@@ -768,9 +768,9 @@ class MyDataCollator:
                 new_item = padding_item(
                     item=aug_data['tokenized'],
                     padding_side=self.dataset.padding_config['padding_side'],
-                    label_padding_id=self.dataset.padding_config['label_padding_id'], 
-                    input_padding_id=self.dataset.padding_config['input_padding_id'], 
-                    max_length=self.dataset.padding_config['max_length'], 
+                    label_padding_id=self.dataset.padding_config['label_padding_id'],
+                    input_padding_id=self.dataset.padding_config['input_padding_id'],
+                    max_length=self.dataset.padding_config['max_length'],
                     position_ids_padding_id=self.dataset.padding_config['position_ids_padding_id']
                 )
                 final['input_ids'].append(new_item['input_ids'])
@@ -788,7 +788,7 @@ class MyDataCollator:
                     assert item['indicator'] == 'compressed-output'
                 new_input_ids.append(self.dataset.tokenizer.eos_token_id)
                 new_labels.append(self.dataset.tokenizer.eos_token_id)
-                
+
                 # print(aug_data['tokenized']['locate_index'])
                 # print(aug_data['tokenized']['locate_indicator'])
                 # exit()
@@ -811,7 +811,7 @@ class MyDataCollator:
                 final['attention_mask'].append(attention_mask)
                 new_position_ids = [i+pos_offset for i in range(len(new_input_ids))]
                 assert len(aug_data['tokenized']['input_ids'] + new_input_ids) == len(aug_data['tokenized']['position_ids'] + new_position_ids)
-                
+
                 new_item = padding_item(
                     item=dict(
                         input_ids=aug_data['tokenized']['input_ids'] + new_input_ids,
@@ -819,13 +819,13 @@ class MyDataCollator:
                         position_ids=aug_data['tokenized']['position_ids'] + new_position_ids,
                     ),
                     padding_side=self.dataset.padding_config['padding_side'],
-                    label_padding_id=self.dataset.padding_config['label_padding_id'], 
-                    input_padding_id=self.dataset.padding_config['input_padding_id'], 
-                    max_length=self.dataset.padding_config['max_length'], 
+                    label_padding_id=self.dataset.padding_config['label_padding_id'],
+                    input_padding_id=self.dataset.padding_config['input_padding_id'],
+                    max_length=self.dataset.padding_config['max_length'],
                     position_ids_padding_id=self.dataset.padding_config['position_ids_padding_id']
                 )
 
-                
+
                 final['input_ids'].append(new_item['input_ids'])
                 final['labels'].append(new_item['labels'])
                 final['position_ids'].append(new_item['position_ids'])
@@ -895,9 +895,9 @@ class MyDataCollator:
             new_item = padding_item(
                 item=recover_prompt_data['tokenized'],
                 padding_side=self.dataset.padding_config['padding_side'],
-                label_padding_id=self.dataset.padding_config['label_padding_id'], 
-                input_padding_id=self.dataset.padding_config['input_padding_id'], 
-                max_length=self.dataset.padding_config['max_length'], 
+                label_padding_id=self.dataset.padding_config['label_padding_id'],
+                input_padding_id=self.dataset.padding_config['input_padding_id'],
+                max_length=self.dataset.padding_config['max_length'],
                 position_ids_padding_id=self.dataset.padding_config['position_ids_padding_id']
             )
             final['input_ids'].append(new_item['input_ids'])
@@ -911,7 +911,7 @@ class MyDataCollator:
                     [end+l_inst+i for i in range(n_comp)]
                 )
                 final['row_comp_index'].extend([bsz_id] * n_comp)
-        
+
         return dict(
             input_ids=torch.as_tensor(
                 final['input_ids']
@@ -933,8 +933,8 @@ class MyDataCollator:
                 final['column_comp_index']
             ),
         )
-    
-    
+
+
     def _aug_mode_wo_pc(self, instances:List[Tuple]) -> Dict:
         final = dict(
             input_ids=list(),
@@ -964,9 +964,9 @@ class MyDataCollator:
             new_item = padding_item(
                 item=aug_data['tokenized'],
                 padding_side=self.dataset.padding_config['padding_side'],
-                label_padding_id=self.dataset.padding_config['label_padding_id'], 
-                input_padding_id=self.dataset.padding_config['input_padding_id'], 
-                max_length=self.dataset.padding_config['max_length'], 
+                label_padding_id=self.dataset.padding_config['label_padding_id'],
+                input_padding_id=self.dataset.padding_config['input_padding_id'],
+                max_length=self.dataset.padding_config['max_length'],
                 position_ids_padding_id=self.dataset.padding_config['position_ids_padding_id']
             )
             final['input_ids'].append(new_item['input_ids'])
@@ -1033,9 +1033,9 @@ class MyDataCollator:
             new_item = padding_item(
                 item=aug_data['tokenized'],
                 padding_side=self.dataset.padding_config['padding_side'],
-                label_padding_id=self.dataset.padding_config['label_padding_id'], 
-                input_padding_id=self.dataset.padding_config['input_padding_id'], 
-                max_length=self.dataset.padding_config['max_length'], 
+                label_padding_id=self.dataset.padding_config['label_padding_id'],
+                input_padding_id=self.dataset.padding_config['input_padding_id'],
+                max_length=self.dataset.padding_config['max_length'],
                 position_ids_padding_id=self.dataset.padding_config['position_ids_padding_id']
             )
             final['input_ids'].append(new_item['input_ids'])
@@ -1085,12 +1085,12 @@ class MyDataCollator:
             return self._merge_dict(data, prompt_data)
         else:
             return data
-    
+
     def _merge_dict(self, dict1, dict2) -> Dict:
 
         return dict(
             input_ids = torch.cat(
-                (dict1['input_ids'], dict2['input_ids']), 
+                (dict1['input_ids'], dict2['input_ids']),
                 dim=0
             ),
             labels=torch.cat(
@@ -1115,14 +1115,14 @@ class MyDataCollator:
             )
         )
 
-        
+
 if __name__ == '__main__':
 
     config_path = "/mnt/lxy/RRcot/configs/LightThinker/qwen/apa_mtp.json"
-    tokenizer_path = "/mnt/zhaorunsong/models/Qwen2.5-0.5B-Instruct"
+    tokenizer_path = "/mnt/zhaorunsong/models/Qwen3-8B"
     dataset_path = "/mnt/lxy/RRcot/data/train/train_debug.jsonl"
 
-    
+
     # bos_token="<|begin_of_text|>"
     # eos_token="<|eot_id|>"
     bos_token="<|im_start|>"
@@ -1141,7 +1141,7 @@ if __name__ == '__main__':
         eos_token=eos_token,
         special_token_list=None,
         add_prefix_space=False,
-        change_rope=False,        
+        change_rope=False,
     )
     for token in config.special_token_name_list:
         if tokenizer.convert_tokens_to_ids(token) == None:
@@ -1157,7 +1157,7 @@ if __name__ == '__main__':
         position_ids_padding_id=0,
     )
     attention_config = dict(
-        diagonal=False,         
+        diagonal=False,
         bi_directional=False,
         see_current=True,
         prefill_compress=False,
@@ -1192,8 +1192,8 @@ if __name__ == '__main__':
     bsz_id = -1
     if 'attention_mask' in batch:
         visualize_attention_mask(
-            attention_mask=batch['attention_mask'][bsz_id, 0].tolist(), 
-            input_ids=batch['input_ids'][bsz_id].tolist(), 
+            attention_mask=batch['attention_mask'][bsz_id, 0].tolist(),
+            input_ids=batch['input_ids'][bsz_id].tolist(),
             tokenizer=tokenizer,
             position_id=None,
             start_offset=0,
@@ -1204,8 +1204,8 @@ if __name__ == '__main__':
 
     print(
         visualize_labels(
-            input_ids=batch['input_ids'][bsz_id].tolist(), 
-            labels=batch['labels'][bsz_id].tolist(), 
+            input_ids=batch['input_ids'][bsz_id].tolist(),
+            labels=batch['labels'][bsz_id].tolist(),
             tokenizer=tokenizer,
             position_ids=batch['position_ids'][bsz_id].tolist() if 'position_ids' in batch else None
         )

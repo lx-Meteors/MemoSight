@@ -2,19 +2,20 @@
 
 # ==================== 路径配置 ====================
 # 所有路径统一在此设置，便于在不同服务器上运行
-# ROOT_DIR="/zhaorunsong/RRcot"  # 项目根目录
-ROOT_DIR="/home/zhaorunsong.zrs/repo/AutoRRcotv13/RRcot" 
+# 默认使用当前仓库，也可通过环境变量覆盖。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="${ROOT_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 INFERENCE_ROOT_DIR="${ROOT_DIR}/LightThinker"  # 推理脚本使用的代码根目录
 
 # 输出路径配置
-OUTPUT_BASE_DIR="/tmp/hx/rrcot"  # 所有输出（训练、推理）的基础目录
+OUTPUT_BASE_DIR="${OUTPUT_BASE_DIR:-${ROOT_DIR}/outputs}"  # 所有输出（训练、推理）的基础目录
 
 # 模型和Tokenizer路径配置
-TOKENIZER_PATH="/tmp/hx/Qwen/Qwen2.5-1.5B-Instruct"  # Tokenizer路径
-MODEL_PATH="/tmp/hx/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"  # 预训练模型路径
+MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-8B}"
+TOKENIZER_PATH="${TOKENIZER_PATH:-${MODEL_PATH}}"
 
 # 训练数据路径配置
-TRAIN_DATA_PATH="/home/zhaorunsong.zrs/repo/RRcot/data/train/train.jsonl"  # 训练数据路径
+TRAIN_DATA_PATH="${TRAIN_DATA_PATH:-${ROOT_DIR}/data/train/train.jsonl}"
 
 # Conda环境配置（用于sglang_inference.sh）
 # CONDA_SH_PATH="/mnt/zhaorunsong/anaconda3/etc/profile.d/conda.sh"  # Conda初始化脚本路径
@@ -27,8 +28,6 @@ REPETITION_PENALTY="1.1"  # 重复惩罚系数
 CKPT="1305"  # 检查点编号，可以根据实际情况修改
 DATASETS=("bbh" "gpqa" "gsm8k" "mmlu")  # 要评估的数据集
 
-# 获取脚本所在目录
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TRAIN_SCRIPT="${SCRIPT_DIR}/train.sh"
 INFERENCE_SCRIPT="${SCRIPT_DIR}/inference.sh"
 SGLANG_INFERENCE_SCRIPT="${SCRIPT_DIR}/sglang_inference.sh"
@@ -65,12 +64,12 @@ inference_and_evaluate() {
     local eval_method=$2
     local inference_script_type=$3
     local compress_config=$4
-    
+
     echo ""
     echo "=========================================="
     echo "      🚀 ${model_tag} 开始推理     "
     echo "=========================================="
-    
+
     # 根据模型类型选择推理脚本
     if [ "$inference_script_type" = "sglang_inference" ]; then
         INFERENCE_CMD="${SGLANG_INFERENCE_SCRIPT}"
@@ -79,47 +78,47 @@ inference_and_evaluate() {
     else
         INFERENCE_CMD="${INFERENCE_SCRIPT}"
         echo "使用 inference.sh 进行推理"
-        bash ${INFERENCE_CMD} "${model_tag}" "${REPETITION_PENALTY}" "${CKPT}" "${INFERENCE_ROOT_DIR}" "${OUTPUT_BASE_DIR}" "${TOKENIZER_PATH}" "${compress_config}"
+        bash ${INFERENCE_CMD} "${model_tag}" "${REPETITION_PENALTY}" "${CKPT}" "${INFERENCE_ROOT_DIR}" "${OUTPUT_BASE_DIR}" "${TOKENIZER_PATH}" "${compress_config}" "${MODEL_PATH}" "${H2O_WINDOW_LENGTH:-2048}" "${H2O_NUM_HH_TOKENS:-1024}"
     fi
-    
+
     if [ $? -ne 0 ]; then
         echo "❌ ${model_tag} 推理失败"
         return 1
     fi
-    
+
     echo "=======✅ ${model_tag} 推理完成 ======="
-    
+
     # 等待推理完全完成
     sleep 10
-    
+
     # 运行评估
     echo ""
     echo "=========================================="
     echo "      🚀 ${model_tag} 评估开始     "
     echo "=========================================="
-    
+
     output_path="${OUTPUT_BASE_DIR}/${model_tag}"
     output_tag="${output_path}/inference"
-    
+
     for dataset in "${DATASETS[@]}"; do
         base_path="${output_tag}/${dataset}"
-        
+
         if [ ! -d "$base_path" ]; then
             echo "⚠️  警告: 推理结果路径不存在: ${base_path}"
             echo "跳过 ${dataset} 数据集的评估"
             continue
         fi
-        
+
         echo "评估数据集: ${dataset}"
         bash ${EVALUATE_SCRIPT} "${eval_method}" "${TOKENIZER_PATH}" "${dataset}" "${base_path}" "${comp_config}"
-        
+
         if [ $? -ne 0 ]; then
             echo "❌ ${model_tag} 在 ${dataset} 数据集上评估失败"
         else
             echo "✅ ${model_tag} 在 ${dataset} 数据集上评估完成"
         fi
     done
-    
+
     echo "=========================================="
     echo "      ✅ ${model_tag} 评估完成     "
     echo "=========================================="

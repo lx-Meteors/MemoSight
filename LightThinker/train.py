@@ -1,14 +1,14 @@
 import os
 import json
-os.environ["TOKENIZERS_PARALLELISM"] = "false" 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import argparse
 import torch
 from typing import *
 from tqdm import tqdm
 from copy import deepcopy
-from model_qwen import Qwen2ForCausalLM
+from model_qwen import Qwen3ForCausalLM
 from model_llama import LlamaForCausalLM
-from transformers import Trainer, TrainingArguments
+from transformers import AutoConfig, Trainer, TrainingArguments
 import deepspeed
 import torch.distributed as dist
 from datetime import timedelta  # 引入时间库
@@ -19,7 +19,7 @@ from transformers.integrations import TensorBoardCallback
 # ===== 关键：在任何其他操作前绑定GPU设备 =====
 if "LOCAL_RANK" in os.environ:
     local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank) 
+    torch.cuda.set_device(local_rank)
     print(f"Process {os.getpid()} set to device: cuda:{local_rank}")
 else:
     local_rank = 0
@@ -43,17 +43,17 @@ from transformers import TrainerCallback
 
 class SaveTokenizerCallback(TrainerCallback):
     """保存checkpoint同时保存tokenizer"""
-    
+
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
-    
+
     def on_save(self, args, state, control, **kwargs):
         """在保存checkpoint时调用"""
         checkpoint_folder = os.path.join(
             args.output_dir,
             f"checkpoint-{state.global_step}"
         )
-        
+
         if os.path.exists(checkpoint_folder):
             self.tokenizer.save_pretrained(checkpoint_folder)
 
@@ -66,7 +66,7 @@ class SaveTokenizerCallback(TrainerCallback):
 class LossBuffer:
     def __init__(self):
         self.history = []
-    
+
     def clear(self):
         self.history = []
 
@@ -83,7 +83,7 @@ def capture_loss_hook(module, input, output):
     # 1. 获取属性，如果不存在则默认为 0.0
     raw_lm = getattr(module, '_last_lm_loss', 0.0)
     raw_mtp = getattr(module, '_last_mtp_loss', 0.0)
-    
+
     # 2. 定义一个辅助逻辑：确保输出统一为 Tensor
     # 这样 Callback 里的 .item() 才能正常工作
     def safe_detach(val):
@@ -91,7 +91,7 @@ def capture_loss_hook(module, input, output):
             return val.detach().cpu() # 移到 CPU 以节省显存
         else:
             return torch.tensor(float(val)) # 如果是 float，这就包装成 Tensor
-            
+
     # 3. 存入 buffer
     loss_buffer.history.append({
         "lm": safe_detach(raw_lm),
@@ -109,7 +109,7 @@ class MTPLossCallback(TrainerCallback):
     def on_step_end(self, args, state, control, **kwargs):
         # 从外部 buffer 读取数据
         history = self.buffer.history
-        
+
         if not history:
             return
 
@@ -117,11 +117,11 @@ class MTPLossCallback(TrainerCallback):
         local_step_lm_sum = sum(item["lm"].item() for item in history)
         local_step_mtp_sum = sum(item["mtp"].item() for item in history)
         micro_count = len(history)
-        
+
         self.local_stats["lm_sum"] += local_step_lm_sum
         self.local_stats["mtp_sum"] += local_step_mtp_sum
         self.local_stats["micro_count"] += micro_count
-        
+
         # 【关键】清空 Buffer，防止内存溢出和数据混淆
         self.buffer.clear()
 
@@ -130,7 +130,7 @@ class MTPLossCallback(TrainerCallback):
             local_lm_sum = self.local_stats["lm_sum"]
             local_mtp_sum = self.local_stats["mtp_sum"]
             local_micro_count = float(self.local_stats["micro_count"])
-            
+
             # === DeepSpeed 多卡同步核心逻辑 ===
             if dist.is_initialized():
                 # 同步 sum 与 count，做全局加权平均，避免卡间样本数不一致带来的偏差
@@ -139,10 +139,10 @@ class MTPLossCallback(TrainerCallback):
                     dtype=torch.float64,
                     device=args.device,
                 )
-                
+
                 # 所有显卡的数据相加 (ReduceOp.SUM)
                 dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
-                
+
                 global_micro_count = max(metrics[2].item(), 1.0)
                 global_avg_lm = (metrics[0] / global_micro_count).item()
                 global_avg_mtp = (metrics[1] / global_micro_count).item()
@@ -161,7 +161,7 @@ class MTPLossCallback(TrainerCallback):
             logs['loss'] = round(global_avg_total, 4)
             logs['lm_loss'] = round(global_avg_lm, 4)
             logs['mtp_loss'] = round(global_avg_mtp, 4)
-            
+
             # 重置计数器
             self.local_stats = {"lm_sum": 0.0, "mtp_sum": 0.0, "micro_count": 0}
 
@@ -236,7 +236,7 @@ def get_parser():
     parser.add_argument('--freeze_model', type=str2bool)
     parser.add_argument('--train_on_input', type=str2bool)
     parser.add_argument('--output_compress_instruction', type=str)
-    parser.add_argument('--hybrid', type=str2bool)  
+    parser.add_argument('--hybrid', type=str2bool)
     parser.add_argument('--prefill_compress', type=str2bool, default=True)
 
     parser.add_argument('--epochs', type=int)
@@ -257,7 +257,7 @@ def get_parser():
 def get_model_and_tokenizer(
     args,
     comp_config:Config
-) -> Tuple[Union[Qwen2ForCausalLM, LlamaForCausalLM], Tokenizer]:
+) -> Tuple[Union[Qwen3ForCausalLM, LlamaForCausalLM], Tokenizer]:
 
     special_token_list:List[str] = list()
     special_token_desp_dict = dict()
@@ -276,19 +276,25 @@ def get_model_and_tokenizer(
             special_token_desp_dict[token] = desp
     if len(special_token_list) > 0:
         tokenizer.add_special_token(special_token_list)
-    
+
     if args.model_type == 'llama':
         model_class = LlamaForCausalLM
     elif args.model_type == 'qwen':
-        model_class = Qwen2ForCausalLM
+        model_class = Qwen3ForCausalLM
+        tokenizer.validate_qwen3()
     else:
         assert False, "We only support llama and qwen model."
+
+    model_config = AutoConfig.from_pretrained(args.model_path, trust_remote_code=True)
+    if args.model_type == 'qwen' and model_config.model_type != "qwen3":
+        raise ValueError(
+            f"Expected a Qwen3 checkpoint, but `{args.model_path}` has "
+            f"model_type={model_config.model_type!r}."
+        )
 
     if args.aux_config is not None and args.aux_config != "None":
         _print(f"use ce + mtp loss...")
         assert os.path.exists(args.aux_config)
-        from transformers import AutoConfig
-        model_config = AutoConfig.from_pretrained(args.model_path, trust_remote_code=True)
         with open(args.aux_config, "r", encoding='utf-8') as f:
             mtp_params = json.load(f)
         _print(f"auxiliary mtp config={mtp_params}")
@@ -305,20 +311,20 @@ def get_model_and_tokenizer(
             init_mtp_from_last_layer(model)
         if comp_config.forzen_model_train_mtp:
             freeze_except_mtp(model)
-    
+
     else:
         _print(f"use ce loss...")
         model = model_class.from_pretrained(
-            args.model_path, torch_dtype=torch.bfloat16
+            args.model_path, config=model_config, torch_dtype=torch.bfloat16
         )
-    
+
     # 1. 挂载钩子 (核心步骤)
     hook_handle = model.register_forward_hook(capture_loss_hook)
 
     model.add_qkv(
-        q='q' in args.qkv,
-        k='k' in args.qkv,
-        v='v' in args.qkv,
+        q='q' in args.qkv or bool(getattr(model.config, "lightthinker_new_q", False)),
+        k='k' in args.qkv or bool(getattr(model.config, "lightthinker_new_k", False)),
+        v='v' in args.qkv or bool(getattr(model.config, "lightthinker_new_v", False)),
     )
 
     if model.model.config.vocab_size != len(tokenizer):
@@ -328,11 +334,11 @@ def get_model_and_tokenizer(
         model.resize_token_embeddings(len(tokenizer), mean_resizing=False)
         _print(f"now.embedding.shape={model.model.embed_tokens.weight.shape}")
         _print(f"now.lm_head.shape={model.lm_head.weight.shape}")
-    
+
     if args.freeze_model:
         _print(f"Freezing Model:\nnew_token: {len(special_token_list)}\norigin_length: {len(tokenizer) - len(special_token_list)}")
         model.freeze_embed(
-            new_token_cnt=len(special_token_list), 
+            new_token_cnt=len(special_token_list),
             origin_length=len(tokenizer) - len(special_token_list)
         )
     else:
@@ -350,7 +356,7 @@ def get_model_and_tokenizer(
                 # lm_head layer
                 last_embedding = model.lm_head.weight[tokenized_ids].mean(axis=0)
                 model.lm_head.weight[-idx, :] = last_embedding.clone().detach().requires_grad_(True)
-    
+
     trainable_params = [name for name, param in model.named_parameters() if param.requires_grad]
     print("Trainable Parameters:")
     for param_name in trainable_params:
@@ -366,12 +372,12 @@ def get_dataset_and_data_collator(
     attention_config:Dict,
     sample_config:Dict,
 ) -> Tuple[MyDataset, MyDataCollator]:
-    
+
     cache_dir=os.path.join(os.path.dirname(args.train_path),"dataset_cache")
     tokenizer_name = os.path.basename(os.path.normpath(args.tokenizer_path))
     dataset_name = os.path.splitext(os.path.basename(args.train_path))[0]
     cache_filename=f"cache_{tokenizer_name}_{dataset_name}.pt"
-    
+
     dataset = MyDataset(
         file_path=args.train_path,
         config=comp_config,
@@ -403,7 +409,7 @@ def main():
     if args.output_compress_instruction == "None":
         args.output_compress_instruction = ""
     print(args)
-    
+
     resume_from_checkpoint = None
     if os.path.exists(args.output_dir):
         checkpoints = [d for d in os.listdir(args.output_dir) if d.startswith("checkpoint-")]
@@ -437,7 +443,7 @@ def main():
     )
 
     dataset, data_collator = get_dataset_and_data_collator(
-        args=args, 
+        args=args,
         comp_config=comp_config,
         tokenizer=tokenizer,
         padding_config=padding_config,
@@ -468,7 +474,7 @@ def main():
         warmup_steps=args.warmup_steps,
         warmup_ratio=args.warmup_ratio,
     )
-    
+
     trainer = Trainer(
         model=model,
         train_dataset=dataset,
@@ -493,7 +499,7 @@ def main():
     # 训练完成，显式移除钩子
     hook_handle.remove()
     print("Hook removed successfully.")
-    
+
 
 
 if __name__ == '__main__':

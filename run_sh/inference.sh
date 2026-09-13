@@ -1,19 +1,19 @@
 
 # ==================== 通过命令行传入必要超参数 ====================
-# 使用方法: ./script.sh [model_tag] [repetition_penalty] [ckpt] [root_dir] [output_base_dir] [tokenizer_path]
-# 示例: ./script.sh "lightthinker" "1.1" "1305" "./LightThinker" "/tmp/hx/rrcot" "/tmp/hx/Qwen/Qwen2.5-1.5B-Instruct"
+# 使用方法: ./script.sh [model_tag] [repetition_penalty] [ckpt] [root_dir] [output_base_dir] [tokenizer_path] [compress_config] [model_path] [h2o_window_length] [h2o_num_hh_tokens]
+# 示例: ./script.sh "qwen3-h2o" "1.1" "0" "./LightThinker" "./outputs" "Qwen/Qwen3-8B" "./configs/LightThinker/qwen/v1.json" "Qwen/Qwen3-8B" "2048" "1024"
 
-# 检查必需参数（至少需要6个：model_tag, repetition_penalty, ckpt, root_dir, output_base_dir, tokenizer_path）
-if [ $# -lt 6 ]; then
+# 检查必需参数
+if [ $# -lt 7 ]; then
     echo "错误: 缺少必需的超参数"
-    echo "使用方法: $0 [model_tag] [repetition_penalty] [ckpt] [root_dir] [output_base_dir] [tokenizer_path]"
+    echo "使用方法: $0 [model_tag] [repetition_penalty] [ckpt] [root_dir] [output_base_dir] [tokenizer_path] [compress_config] [model_path] [h2o_window_length] [h2o_num_hh_tokens]"
     echo "  model_tag: 必需，模型标识（与训练时的init_tag一致）"
     echo "  repetition_penalty: 必需，重复惩罚系数"
     echo "  ckpt: 必需，检查点编号"
     echo "  root_dir: 必需，代码根目录"
     echo "  output_base_dir: 必需，输出基础目录"
     echo "  tokenizer_path: 必需，tokenizer路径"
-    echo "示例: $0 \"lightthinker\" \"1.1\" \"1305\" \"/zhaorunsong/RRcot/LightThinker\" \"/tmp/hx/rrcot\" \"/tmp/hx/Qwen/Qwen2.5-1.5B-Instruct\""
+    echo "示例: $0 \"qwen3-h2o\" \"1.1\" \"0\" \"./LightThinker\" \"./outputs\" \"Qwen/Qwen3-8B\" \"./configs/LightThinker/qwen/v1.json\" \"Qwen/Qwen3-8B\" \"2048\" \"1024\""
     exit 1
 fi
 
@@ -25,9 +25,12 @@ root_dir="$4"
 output_base_dir="$5"
 tokenizer_path="$6"
 compress_config="$7"
+explicit_model_path="$8"
+h2o_window_length="${9:-2048}"
+h2o_num_hh_tokens="${10:-1024}"
 
 # 根据model_tag自动调整use_EPL：vanilla和lightthinker为false，其余为true
-if [ "$model_tag" = "vanilla" ] || [ "$model_tag" = "lightthinker" ] || [ "$model_tag" = "distill-r1-7b" ] || [ "$model_tag" = "apa_mtp_w3e-1_wo-epl" ]; then
+if [ "$model_tag" = "vanilla" ] || [ "$model_tag" = "vanilla_h2o" ] || [ "$model_tag" = "qwen3-h2o" ] || [ "$model_tag" = "lightthinker" ] || [ "$model_tag" = "distill-r1-7b" ] || [ "$model_tag" = "apa_mtp_w3e-1_wo-epl" ]; then
     use_EPL="false"
 else
     use_EPL="true"
@@ -48,7 +51,7 @@ fi
 # 根据传入的超参数自动组合路径
 output_path="${output_base_dir}/${model_tag}"
 output_tag="${output_path}/inference"
-model_path="${output_path}/train/checkpoint-${ckpt}"
+model_path="${explicit_model_path:-${output_path}/train/checkpoint-${ckpt}}"
 
 # 检查模型路径是否存在
 if [ ! -d "$model_path" ]; then
@@ -83,7 +86,7 @@ prefill_compress="false"
 update_attention_method="local"
 
 
-# check "inference_log" 
+# check "inference_log"
 if [ ! -d "${output_tag}/inference_log" ]; then
     echo "Creating ${output_tag}/inference_log directory..."
     mkdir -p "${output_tag}/inference_log"
@@ -118,14 +121,14 @@ do
     # 计算当前显卡负责的 "0-based" 索引范围 (例如 0,1,2)
     start_index_0based=$((logical_id * process_per_gpu))
     end_index_0based=$((start_index_0based + process_per_gpu - 1))
-    echo ">>> Launching on Physical GPU ${device}" 
+    echo ">>> Launching on Physical GPU ${device}"
     for ((idx=start_index_0based; idx<=end_index_0based; idx++))
     do
         real_index=$((idx + 1))
-        
+
         echo "    Starting task index ${real_index}/${split_size}..."
 
-        # 评测EPL训练模型时 --EPL=True 
+        # 评测EPL训练模型时 --EPL=True
         CUDA_VISIBLE_DEVICES=$device nohup python "${root_dir}/inference.py" \
             --model_tag $model_tag \
             --model_short_tag $model_short_tag \
@@ -149,9 +152,12 @@ do
             --update_attention_method $update_attention_method \
             --split_size $split_size \
             --use_EPL $use_EPL \
+            --use_h2o true \
+            --h2o_window_length $h2o_window_length \
+            --h2o_num_hh_tokens $h2o_num_hh_tokens \
             --model_path $model_path \
             --index $real_index > "${output_tag}/inference_log/${rolling_rope}_${compress_prompt}/${real_index}${prefix}_${model_short_tag}_${ckpt}.txt" 2>&1 &
-        
+
         sleep 5
     done
     ((logical_id++))

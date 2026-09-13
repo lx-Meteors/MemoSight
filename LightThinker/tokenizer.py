@@ -19,6 +19,8 @@ class Tokenizer:
         change_rope:bool=False,
     ):
         self.change_rope:bool = change_rope
+        self.bos_token:str = bos_token
+        self.eos_token:str = eos_token
         self.tokenizer:AutoTokenizer = AutoTokenizer.from_pretrained(
             tokenizer_path,
             add_prefix_space=add_prefix_space,
@@ -26,11 +28,22 @@ class Tokenizer:
         )
         if special_token_list != None:
             self.add_special_token(special_token_list)
-        self.bos_token:str = bos_token
-        self.eos_token:str = eos_token
         self.tokenizer.add_eos_token = False
         self.tokenizer.add_bos_token = False
-    
+        self._refresh_special_token_ids()
+
+    def _refresh_special_token_ids(self):
+        self.bos_token_id = (
+            None if self.bos_token is None else self.tokenizer.convert_tokens_to_ids(self.bos_token)
+        )
+        self.eos_token_id = (
+            None if self.eos_token is None else self.tokenizer.convert_tokens_to_ids(self.eos_token)
+        )
+        if self.bos_token is not None and self.bos_token_id is None:
+            raise ValueError(f"Tokenizer does not contain the configured BOS token: {self.bos_token}")
+        if self.eos_token is not None and self.eos_token_id is None:
+            raise ValueError(f"Tokenizer does not contain the configured EOS token: {self.eos_token}")
+
     def add_special_token(self, special_token_list:List[str]):
         _print("expanding tokenizer ...")
         num_added_tokens = self.tokenizer.add_tokens(
@@ -38,19 +51,25 @@ class Tokenizer:
         )
         assert num_added_tokens == len(special_token_list), f"{special_token_list}"
         _print(f"{num_added_tokens} tokens have been added including {special_token_list}")
-        self.bos_token_id = None if self.bos_token == None else self.tokenizer.convert_tokens_to_ids(self.bos_token)
-        self.eos_token_id = None if self.eos_token == None else self.tokenizer.convert_tokens_to_ids(self.eos_token)
-        if self.eos_token_id is None:
-            assert self.eos_token is None
-        if self.bos_token_id is None:
-            assert self.bos_token is None
+        self._refresh_special_token_ids()
         return self.tokenizer
 
     def __getattr__(self, name):
         return getattr(self.tokenizer, name)
-    
+
     def __len__(self):
         return len(self.tokenizer)
+
+    def validate_qwen3(self):
+        """Fail fast when a Qwen2/Qwen2.5 tokenizer is paired with Qwen3."""
+        required_tokens = ("<think>", "</think>")
+        vocabulary = self.tokenizer.get_vocab()
+        missing_tokens = [token for token in required_tokens if token not in vocabulary]
+        if missing_tokens:
+            raise ValueError(
+                "The selected tokenizer is not a Qwen3 tokenizer; missing native tokens: "
+                f"{missing_tokens}. Use the tokenizer shipped with the Qwen3 checkpoint."
+            )
 
     def normal_data_tokenize(
         self,
@@ -115,9 +134,9 @@ class Tokenizer:
     def aug_data_tokenize(
         self,
         structured_input:List[List],
-        # save, abandoned, compressed 
+        # save, abandoned, compressed
         structured_input_indicator:List[List[str]],
-        n_comp_for_output:int,  
+        n_comp_for_output:int,
         n_continue_for_output:int,
         n_comp_for_prompt:int,
         n_continue_for_prompt:int,
@@ -132,7 +151,7 @@ class Tokenizer:
         # 1. tokenize
         whole_input = ""
         tokenized_whole_input_from_segement = list()
-        
+
         tokenized_input_id_list:List[List[List[int]]] = list()
         for segement_list in structured_input:
             tokenized_input_id_list.append(list())
@@ -219,7 +238,7 @@ class Tokenizer:
                         final_item['locate_indicator'].append(structured_input_indicator[i][j+1])
                         final_item['locate_index'].append(
                             [
-                                len(final_item['input_ids']), 
+                                len(final_item['input_ids']),
                                 len(final_item['input_ids']) + len(tokenized_input_id_list[i][j]),
                                 len(tokenized_input_id_list[i][j+1]) - n_comp - n_continue,
                                 n_comp,
@@ -242,14 +261,14 @@ class Tokenizer:
                                 # base_pos: 全局起始偏移
                                 # int(...): 向下取整得到整数索引
                                 center_offset = int(k * step + step / 2)
-                                
+
                                 # 计算最终位置
                                 pos = base_pos + center_offset
                                 compressed_positions.append(pos)
-                            
+
                         else:
                             compressed_positions = None
-                
+
                 if use_EPL and structured_input_indicator[i][j] == 'compressed-output':
                     compression_count += n_compressed
                     for k in range(len(tokenized_label_list[i][j])):
@@ -262,7 +281,7 @@ class Tokenizer:
                             final_item['position_ids'].append(compressed_positions[k])
                         else:
                             final_item['position_ids'].append(end_pos)
-                        
+
                         final_item['input_ids'].append(tokenized_input_id_list[i][j][k])
                         final_item['labels'].append(tokenized_label_list[i][j][k])
                 else:
@@ -282,7 +301,7 @@ class Tokenizer:
         # we do not use revover mode
         recover_item_list:List[Dict] = list()
         if recover_mode:
-            # we do not use recover mode 
+            # we do not use recover mode
             delta_length = max_length - len(final_item['input_ids']) - 2
             if delta_length <= 0:
                 return recover_item_list, final_item
@@ -301,7 +320,7 @@ class Tokenizer:
                     if delta_length < 0:
                         break
                     recover_item_list.append(new_item)
-                
+
         return recover_item_list, final_item
 
 
@@ -312,7 +331,7 @@ class Tokenizer:
             new_input_ids.append(register_token_id)
             new_input_ids.append(input_ids[i])
         return new_input_ids
-    
+
     def _calculate_position_ids_with_register(self, input_ids: list[int], register_token_id: int, offset, base_pos: int) -> list[int]:
         # input_ids为[R,C,R,C,...,R,C]的形式
         # 找到所有register_token_id（R）对应的位置
@@ -337,13 +356,13 @@ class Tokenizer:
                 position_ids.append(content_pos)
                 content_pos += 1
         return position_ids
-    
+
     def aug_data_tokenize_apa_mtp(
         self,
         structured_input:List[List],
-        # save, abandoned, compressed 
+        # save, abandoned, compressed
         structured_input_indicator:List[List[str]],
-        n_comp_for_output:int,  
+        n_comp_for_output:int,
         n_continue_for_output:int,
         n_comp_for_prompt:int,
         n_continue_for_prompt:int,
@@ -365,8 +384,8 @@ class Tokenizer:
         # register token id
         regitser_token_id = self.tokenizer.convert_tokens_to_ids(regitser_token)
         # mtp register offset
-        register_mtp_offset = random.randint(1, 4) 
-        
+        register_mtp_offset = random.randint(1, 4)
+
         for i, segement_list in enumerate(structured_input):
             tokenized_input_id_list.append(list())
             for j, segement in enumerate(segement_list):
@@ -402,8 +421,8 @@ class Tokenizer:
                         tokenized_input_id_list[-1][-1]
                     )
                     whole_input += segement
-        
-        # we do not check consistency for register token    
+
+        # we do not check consistency for register token
         # if check_consistency:
         #     tokenized_whole_input = self.tokenizer(
         #         whole_input, return_tensors=None
@@ -431,7 +450,7 @@ class Tokenizer:
                                 else:
                                     # 越界的部分 label 设置为 IGNORE_LABEL_ID
                                     tokenized_label_list[i][j][k] = IGNORE_LABEL_ID
-        
+
         else:
             for i in range(len(tokenized_label_list)):
                 for j in range(len(tokenized_label_list[i])):
@@ -487,7 +506,7 @@ class Tokenizer:
                         # 被压缩cot step的compressed-token和continue-token数量
                         final_item['locate_index'].append(
                             [
-                                len(final_item['input_ids']), 
+                                len(final_item['input_ids']),
                                 len(final_item['input_ids']) + len(tokenized_input_id_list[i][j]),
                                 len(tokenized_input_id_list[i][j+1]) - n_comp - n_continue,
                                 n_comp,
@@ -500,7 +519,7 @@ class Tokenizer:
                             # 因为加入了register token，所以需要//2
                             n_abandoned = len(tokenized_input_id_list[i][j]) // 2
                             n_compressed = n_comp
-                            
+
                             # 真实的位置编码是相对于register token的，所以需要-register_count
                             base_pos = len(final_item['input_ids']) - compression_count - register_count
                             end_pos = len(final_item['input_ids']) + n_abandoned - compression_count - register_count
@@ -512,14 +531,14 @@ class Tokenizer:
                                 # base_pos: 全局起始偏移
                                 # int(...): 向下取整得到整数索引
                                 center_offset = int(k * step + step / 2)
-                                
+
                                 # 计算最终位置
                                 pos = base_pos + center_offset
                                 compressed_positions.append(pos)
                         else:
                             n_abandoned = len(tokenized_input_id_list[i][j]) // 2
                             compressed_positions = None
-                
+
                 if use_EPL and structured_input_indicator[i][j] == 'compressed-output':
                     compression_count += n_compressed
                     for k in range(len(tokenized_label_list[i][j])):
@@ -532,7 +551,7 @@ class Tokenizer:
                             final_item['position_ids'].append(compressed_positions[k])
                         else:
                             final_item['position_ids'].append(end_pos)
-                        
+
                         final_item['input_ids'].append(tokenized_input_id_list[i][j][k])
                         final_item['labels'].append(tokenized_label_list[i][j][k])
                 else:
@@ -557,19 +576,17 @@ class Tokenizer:
                             if len(final_item['input_ids']) >= max_length:
                                 break
                             final_item['position_ids'].append(len(final_item['input_ids']) - compression_count - register_count)
-                            
+
                             final_item['input_ids'].append(tokenized_input_id_list[i][j][k])
                             final_item['labels'].append(tokenized_label_list[i][j][k])
 
         # 4. recover
         # we do not use revover mode
         recover_item_list:List[Dict] = list()
-       
+
         return recover_item_list, final_item
-  
+
 
 if __name__ == '__main__':
     pass
-    
-
 

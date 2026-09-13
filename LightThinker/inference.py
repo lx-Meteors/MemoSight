@@ -8,13 +8,13 @@ import numpy as np
 from typing import *
 from tqdm import tqdm
 from copy import deepcopy
-from transformers import AutoTokenizer, DynamicCache, GenerationConfig,RepetitionPenaltyLogitsProcessor
+from transformers import AutoConfig, AutoTokenizer, DynamicCache, GenerationConfig, RepetitionPenaltyLogitsProcessor
 
 from LightThinker.utils import *
 from config import Config
 from tokenizer import Tokenizer
 from model_llama import LlamaForCausalLM
-from model_qwen import Qwen2ForCausalLM
+from model_qwen import Qwen3ForCausalLM
 from dataset_reader import GPQAReader, MMLUReader, BBHReader, GSM8KReader, Reader
 
 DEBUG:bool=False
@@ -39,24 +39,68 @@ class H2ODynamicCache(DynamicCache):
         super().__init__()
         self.window_length = int(window_length)
         self.num_hh_tokens = int(num_hh_tokens)
+        if self.window_length < 2:
+            raise ValueError("H2O window_length must be at least 2.")
+        if not 0 < self.num_hh_tokens < self.window_length:
+            raise ValueError(
+                "H2O num_hh_tokens must be greater than 0 and smaller than window_length."
+            )
         self.accumulated_attention_scores: List[torch.Tensor] = []
+        # Logical token positions for every physical KV entry. H2O can select
+        # different heavy hitters per KV head, so positions are tracked as
+        # [batch, num_kv_heads, physical_cache_length].
+        self.cache_positions: List[torch.Tensor] = []
+
+    def update(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Append K/V and their logical RoPE positions atomically."""
+        updated_states = super().update(key_states, value_states, layer_idx, cache_kwargs)
+        num_new_tokens = key_states.shape[-2]
+        cache_position = (cache_kwargs or {}).get("cache_position")
+        if cache_position is None:
+            cache_position = torch.arange(
+                self._seen_tokens - num_new_tokens,
+                self._seen_tokens,
+                device=key_states.device,
+                dtype=torch.long,
+            )
+        else:
+            cache_position = cache_position.to(device=key_states.device, dtype=torch.long).reshape(-1)
+
+        positions = cache_position.view(1, 1, -1).expand(
+            key_states.shape[0], key_states.shape[1], -1
+        )
+        if len(self.cache_positions) <= layer_idx:
+            self.cache_positions.append(positions)
+        else:
+            self.cache_positions[layer_idx] = torch.cat(
+                [self.cache_positions[layer_idx], positions], dim=-1
+            )
+        return updated_states
 
     @torch.no_grad()
     def update_slimming(self, attention_scores: torch.Tensor, num_kv_groups: int, layer_idx: int):
         """
         Sliming the cache based on accumulated attention scores.
         Only keep heavy-hitters + local (recent) tokens.
-        
+
         From: https://arxiv.org/pdf/2306.14048
         Reference: https://github.com/meta-llama/llama-cookbook/blob/main/end-to-end-use-cases/long_context/H2O/utils/cache.py
         """
         # attention_scores: [bs, num_heads, q_len, k_len]
         # Sum over query dimension, downsample by kv_groups
+        num_new_tokens = attention_scores.shape[2]
+        kv_scores = attention_scores.sum(2)[:, ::num_kv_groups, :]
+
         if len(self.accumulated_attention_scores) <= layer_idx:
-            self.accumulated_attention_scores.append(attention_scores.sum(2)[:,::num_kv_groups, :])
+            self.accumulated_attention_scores.append(kv_scores)
         else:
-            num_new_tokens = attention_scores.shape[2]
-            updated_attention_scores = attention_scores.sum(2)[:,::num_kv_groups, :]  # [bs, num_heads, k_len]
+            updated_attention_scores = kv_scores
             # 累加：新分数的旧位置 += 历史分数（正确的对齐方式！）
             updated_attention_scores[:, :, :-num_new_tokens] += self.accumulated_attention_scores[layer_idx]
             self.accumulated_attention_scores[layer_idx] = updated_attention_scores
@@ -68,21 +112,21 @@ class H2ODynamicCache(DynamicCache):
         seq_len = self.get_seq_length(layer_idx)
         # 在最近的 window_length - num_hh_tokens 之前的部分搜索 heavy-hitter
         seq_scores = self.accumulated_attention_scores[layer_idx][:, :, :-self.window_length + self.num_hh_tokens]
-        
+
         # Top-k heavy-hitter tokens
         _, keep_hh_idx = torch.topk(seq_scores, self.num_hh_tokens, dim=-1)
         keep_hh_idx = keep_hh_idx.sort(dim=-1).values  # 排序以保持顺序
-        
+
         # Recent tokens（最后的 window_length - num_hh_tokens 个）
         keep_local_idx = torch.arange(
             seq_len - (self.window_length - self.num_hh_tokens),
             seq_len,
             device=keep_hh_idx.device
         ).repeat(keep_hh_idx.shape[0], keep_hh_idx.shape[1], 1)
-        
+
         # 合并 indices
         keep_idx = torch.cat([keep_hh_idx, keep_local_idx], dim=-1)
-        
+
         # 使用 mask 进行索引（官方方式）
         mask = torch.zeros(
             self.accumulated_attention_scores[layer_idx].shape,
@@ -90,20 +134,76 @@ class H2ODynamicCache(DynamicCache):
             device=keep_hh_idx.device
         )
         mask = mask.scatter(-1, keep_idx, 1)
-        
+
         # 修剪 K/V cache
         bsz, num_heads, _, head_dim = self.key_cache[layer_idx].shape
         self.key_cache[layer_idx] = self.key_cache[layer_idx][mask].view(bsz, num_heads, -1, head_dim)
         self.value_cache[layer_idx] = self.value_cache[layer_idx][mask].view(bsz, num_heads, -1, head_dim)
         self.accumulated_attention_scores[layer_idx] = self.accumulated_attention_scores[layer_idx][mask].view(bsz, num_heads, -1)
+        self.cache_positions[layer_idx] = self.cache_positions[layer_idx][mask].view(bsz, num_heads, -1)
+
+    def map_attention_mask(
+        self,
+        attention_mask: Optional[torch.Tensor],
+        num_kv_groups: int,
+        layer_idx: int,
+    ) -> Optional[torch.Tensor]:
+        """Map a logical 4-D mask to the physical, head-specific H2O cache."""
+        if attention_mask is None or attention_mask.dim() != 4 or len(self.cache_positions) <= layer_idx:
+            return attention_mask
+
+        key_positions = self.cache_positions[layer_idx].repeat_interleave(num_kv_groups, dim=1)
+        physical_length = key_positions.shape[-1]
+        if key_positions.numel() == 0 or int(key_positions.max()) >= attention_mask.shape[-1]:
+            # The model generated an already-physical causal mask.
+            return attention_mask[..., :physical_length]
+
+        expanded_mask = attention_mask.expand(
+            attention_mask.shape[0], key_positions.shape[1], attention_mask.shape[-2], -1
+        )
+        gather_index = key_positions.unsqueeze(-2).expand(-1, -1, attention_mask.shape[-2], -1)
+        return torch.gather(expanded_mask, dim=-1, index=gather_index)
+
+    @torch.no_grad()
+    def remove_logical_range(self, start: int, end: int):
+        """Remove a LightThinker-compressed logical range from an H2O cache."""
+        removed_length = end - start
+        if removed_length <= 0:
+            return
+
+        for layer_idx in range(len(self.key_cache)):
+            positions = self.cache_positions[layer_idx]
+            keep_mask = (positions < start) | (positions >= end)
+            kept_per_head = keep_mask.sum(dim=-1)
+            if not torch.equal(kept_per_head, kept_per_head[..., :1].expand_as(kept_per_head)):
+                raise RuntimeError(
+                    "Cannot compact this logical range because H2O retained a different "
+                    "number of affected tokens across KV heads."
+                )
+
+            bsz, num_heads, _, head_dim = self.key_cache[layer_idx].shape
+            new_length = int(kept_per_head.reshape(-1)[0])
+            self.key_cache[layer_idx] = self.key_cache[layer_idx][keep_mask].view(
+                bsz, num_heads, new_length, head_dim
+            )
+            self.value_cache[layer_idx] = self.value_cache[layer_idx][keep_mask].view(
+                bsz, num_heads, new_length, head_dim
+            )
+            self.accumulated_attention_scores[layer_idx] = self.accumulated_attention_scores[layer_idx][
+                keep_mask
+            ].view(bsz, num_heads, new_length)
+            positions = positions[keep_mask].view(bsz, num_heads, new_length)
+            self.cache_positions[layer_idx] = positions - (positions >= end).to(positions.dtype) * removed_length
+
+        self._seen_tokens -= removed_length
 
 class DebugUtils:
 
     @classmethod
     def show_global_attention(
-        cls, 
+        cls,
         tokenizer:Tokenizer,
-        attention_mask:List[List[Union[bool, float]]], 
+        attention_mask:List[List[Union[bool, float]]],
         input_ids:List[int],
         position_ids:List[int]=None,
         block:bool=False,
@@ -126,7 +226,7 @@ class DebugUtils:
             input_ids = input_ids[start_offset:end_offset]
             if position_ids != None:
                 position_ids = position_ids[start_offset:end_offset]
-        
+
         # True -> don't mask
         # False -> mask
         for i in range(len(attention_mask)):
@@ -144,7 +244,7 @@ class DebugUtils:
         position_ids.append(-1)
         xlabel = ['\n' + l for l in label]
         ylabel = ["\n" + ("" if position_ids == None else f"({position_ids[idx]})") + l for idx, l in enumerate(label)]
-        
+
         cmap = mcolors.ListedColormap(['lightgray', 'yellow'])
         plt.imshow(attention_mask, cmap=cmap)
         plt.grid(which='both', color='gray', linestyle='-', linewidth=0.5)
@@ -183,7 +283,7 @@ class DebugUtils:
             input_ids = input_ids[start_offset:end_offset]
             if position_ids != None:
                 position_ids = position_ids[start_offset:end_offset]
-        
+
         # True -> don't mask
         # False -> mask
         for i in range(len(attention_mask)):
@@ -225,7 +325,7 @@ class InferenceUtils:
         extra_generated_ids:List[int]=None,
     ) -> int:
         # [bs, seq_length, vocab_size]
-        logits = model_output.logits    
+        logits = model_output.logits
         # [vocab_size]
         target_logits = logits[0, idx, :]
 
@@ -242,7 +342,7 @@ class InferenceUtils:
 
             if len(generated_ids)>0:
                 #构造tensor
-                input_ids_tensor = torch.tensor([list(generated_ids)],dtype=torch.long,device=target_logits.device)       
+                input_ids_tensor = torch.tensor([list(generated_ids)],dtype=torch.long,device=target_logits.device)
                 #构造processor
                 processor=RepetitionPenaltyLogitsProcessor(penalty=repetition_penalty)
                 #处理logits
@@ -256,9 +356,9 @@ class InferenceUtils:
 class AttentionUtils:
 
     def __init__(
-        self, 
-        max_length:int, 
-        device:str, 
+        self,
+        max_length:int,
+        device:str,
         dtype,
         attention_config:Dict,
         prefill_compress:bool,
@@ -268,15 +368,15 @@ class AttentionUtils:
     ):
         """
         args:
-            - max_length: 
+            - max_length:
                 max generated tokens
-            - device: 
+            - device:
                 "cuda"
-            - dtype: 
+            - dtype:
                 fp16 or bf16
-            - attention_config: 
+            - attention_config:
                 attention mask
-            - prefill_compress: 
+            - prefill_compress:
                 if True:
                     we will compress the prompt part
                 if False:
@@ -324,14 +424,14 @@ class AttentionUtils:
         # mask value
         self.mask_value = self.min_dtype
         self.show_value = 0.
-        
+
         # Indicates which row you are currently on to start writing.
         self.last_idx = 0
 
         # diagonal attention, this is used for args.diagonal being True.
         self.diagonal_attn = torch.full((max_comp_size, max_comp_size), self.mask_value)
         self.diagonal_attn.fill_diagonal_(self.show_value)
-        
+
         # used for global attention
         self.global_indicator_list:List[List[int]] = list()
 
@@ -367,7 +467,7 @@ class AttentionUtils:
 
             # 1. the current content is invisible for later content.
             self.cur_attn[
-                comp_end:length, 
+                comp_end:length,
                 text_start:text_end
             ] = self.mask_value
 
@@ -377,7 +477,7 @@ class AttentionUtils:
                     comp_start:comp_end,
                     0:text_start
                 ] = self.mask_value
-            
+
             # 3. attention config
             if bi_attention:
                 self.cur_attn[
@@ -424,7 +524,7 @@ class AttentionUtils:
                     comp_start:comp_end,
                     0:text_start
                 ] = self.max_value
-            
+
             # 3. attention config
             if bi_attention:
                 self.cur_attn[
@@ -456,7 +556,7 @@ class AttentionUtils:
             self.last_idx:self.last_idx+new_length,
             0:self.last_idx
         ] = self.cur_attn[self.last_idx-1, 0:self.last_idx]
-        
+
         # 2. if current is in compression mode
         if indicator != None:
             self.global_indicator_list.append(indicator)
@@ -472,13 +572,13 @@ class AttentionUtils:
                     comp_start:comp_end,
                     0:text_start
                 ] = self.mask_value
-            
+
             if bi_attention:
                 self.cur_attn[
                     comp_start:comp_end,
                     comp_start:comp_end,
                 ] = self.show_value
-            
+
             if diagonal:
                 self.cur_attn[
                     comp_start:comp_end,
@@ -490,9 +590,9 @@ class AttentionUtils:
 
         self.last_idx += new_length
 
-        # 3. truncate and return 
+        # 3. truncate and return
         self.delta_attn[:] = self.show_value
-        remove_size = 0 
+        remove_size = 0
         if indicator != None:
             for _indicator in self.global_indicator_list[0:-1]:
                 text_start, text_end, n_inst, comp_start, comp_end, n_cont = _indicator
@@ -506,11 +606,11 @@ class AttentionUtils:
             n_prefix = new_length - (comp_end - comp_start + n_cont)
             save_length = self.last_idx - remove_size
             self.delta_attn[
-                0:new_length, 
+                0:new_length,
                 text_start:save_length
             ] = \
                 self.cur_attn[
-                    self.last_idx - new_length: self.last_idx, 
+                    self.last_idx - new_length: self.last_idx,
                     text_start+remove_size:self.last_idx
                 ]
             self.delta_attn[0:new_length, self.last_idx - remove_size-new_length:self.last_idx - remove_size] = \
@@ -570,7 +670,7 @@ class AttentionUtils:
                     comp_start_r:comp_end_r,
                     comp_start_c:comp_end_c
                 ] = self.show_value
-            
+
             if diagonal:
                 self.delta_attn[
                     comp_start_r:comp_end_r,
@@ -579,7 +679,7 @@ class AttentionUtils:
                     0:comp_end_r-comp_start_r,
                     0:comp_end_r-comp_start_r,
                 ]
-        
+
         return self.delta_attn[0:new_length, 0:origin_length+new_length].unsqueeze(dim=0).unsqueeze(dim=0)
 
     def update_attention_local_for_mtp_register(
@@ -626,7 +726,7 @@ class AttentionUtils:
                     comp_start_r:comp_end_r,
                     comp_start_c:comp_end_c
                 ] = self.show_value
-            
+
             if diagonal:
                 self.delta_attn[
                     comp_start_r:comp_end_r,
@@ -645,7 +745,7 @@ class AttentionUtils:
                     self.delta_attn[q_idx, origin_length + k_idx] = self.mask_value
 
         return self.delta_attn[0:new_length, 0:origin_length+new_length].unsqueeze(dim=0).unsqueeze(dim=0)
-        
+
     def reset(self):
         self.cur_attn[:, :] = self.base_attn[:, :]
         self.last_idx = 0
@@ -676,6 +776,10 @@ class KVUtils:
 
     @torch.no_grad()
     def reduce_cache(self, start:int, end:int):
+        if hasattr(self.past_key_values, "remove_logical_range"):
+            self.past_key_values.remove_logical_range(start, end)
+            return
+
         assert end <= self.past_key_values._seen_tokens
         assert self.past_key_values._seen_tokens == self.past_key_values.key_cache[0].shape[2]
 
@@ -714,6 +818,8 @@ class KVUtils:
     def __del__(self):
         if hasattr(self.past_key_values, "accumulated_attention_scores"):
             del self.past_key_values.accumulated_attention_scores
+        if hasattr(self.past_key_values, "cache_positions"):
+            del self.past_key_values.cache_positions
         del self.past_key_values.value_cache
         del self.past_key_values.key_cache
         del self.past_key_values
@@ -765,7 +871,7 @@ class TokenUtils:
             if end < 0:
                 end = self._seen_tokens + end
             return self.input_ids[..., start:end]
-    
+
     def get_input_ids(self, idx:int) -> torch.Tensor:
         if idx >= 0:
             return self.input_ids[..., idx:idx+1]
@@ -785,7 +891,7 @@ class TokenUtils:
             new_pos = len(self._current_position_ids)
         else:
             new_pos = self._whole_position_ids[-1] + 1
-    
+
         self.position_ids[..., self._seen_tokens] = new_pos
         self._current_position_ids.append(new_pos)
         self._whole_position_ids.append(new_pos)
@@ -808,7 +914,7 @@ class TokenUtils:
                     self._current_position_ids.append(self._whole_position_ids[-1] + 1)
                     self._whole_position_ids.append(self._whole_position_ids[-1] + 1)
         _end = _start + len(input_ids)
-        
+
         if self.rolling_rope:
             self.position_ids[..., 0:self._seen_tokens+len(input_ids)] = self.arange_ids[0:self._seen_tokens]
             self._current_position_ids.extend([self._current_position_ids[-1] + i + 1 for i in range(len(input_ids))])
@@ -821,7 +927,7 @@ class TokenUtils:
         if return_tensors:
             # 这里切片的原因是前面用的都是kvcache，所以不需要重新考虑position_ids，只需解决当前position_ids
             return self.input_ids[..., _start:_end], self.position_ids[..., _start:_end]
- 
+
     def reduce_input_ids(self, start:int, end:int):
         origin_length = self._seen_tokens
         self._seen_tokens -= (end-start)
@@ -832,7 +938,7 @@ class TokenUtils:
         else:
             self.input_ids[..., start:self._seen_tokens] = self.input_ids[..., end:origin_length]
             self._current_input_ids[start:self._seen_tokens] = self._current_input_ids[end:origin_length]
-        
+
         self._current_input_ids = self._current_input_ids[0:self._seen_tokens]
 
         if not self.rolling_rope:
@@ -869,7 +975,7 @@ class TokenUtils:
             # base_pos: 全局起始偏移
             # int(...): 向下取整得到整数索引
             center_offset = int(k * step + step / 2)
-            
+
             # 计算最终位置
             pos = cot_start + center_offset
             compressed_positions.append(pos)
@@ -882,7 +988,7 @@ class TokenUtils:
 # ========== CORE CODE ==========
 @torch.no_grad()
 def _prefill_wo_prompt_compression(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     system_prompt:str,
@@ -917,7 +1023,7 @@ def _prefill_wo_prompt_compression(
     if DEBUG:
         DebugUtils.show_global_attention(
             tokenizer=tokenizer,
-            attention_mask=attention_mask.squeeze().cpu().tolist(), 
+            attention_mask=attention_mask.squeeze().cpu().tolist(),
             input_ids=input_ids,
             position_ids=token_utils.get_position_ids().squeeze().cpu().tolist(),
             block=BLOCK,
@@ -929,7 +1035,7 @@ def _prefill_wo_prompt_compression(
     # 3. model.forward()
     model_output = model(
         input_ids=torch.as_tensor(
-            [input_ids], device="cuda"
+            [input_ids], device=token_utils.input_ids.device
         ),
         use_cache=True,
         past_key_values=past_key_values,
@@ -942,10 +1048,10 @@ def _prefill_wo_prompt_compression(
     )
 
     return predicted_token_id, model_output.hidden_states[-1]
-    
+
 @torch.no_grad()
 def _prefill_w_prompt_compression(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     question:str,
@@ -962,7 +1068,7 @@ def _prefill_w_prompt_compression(
 ) -> int:
     """
     prompt will be compressed
-    
+
     All the code here is not reused to ensure clarity and readability as much as possible.
     """
     assert compress_prompt == True
@@ -1011,7 +1117,7 @@ def _prefill_w_prompt_compression(
             indicator_list.append(
                 [text_start, text_end, n_inst, comp_start, comp_end, n_cont]
             )
-        
+
         input_ids.extend(middle_input_ids)
         token_utils.show_prompt_input_ids.extend(middle_input_ids)
         for i in range(0, len(question_input_ids), step):
@@ -1084,7 +1190,7 @@ def _prefill_w_prompt_compression(
             indicator_list.append(
                 [text_start, text_end, n_inst, comp_start, comp_end, n_cont]
             )
-        
+
         input_ids.extend(middle_input_ids)
         token_utils.show_prompt_input_ids.extend(middle_input_ids)
         for sent in question_list:
@@ -1123,7 +1229,7 @@ def _prefill_w_prompt_compression(
         # print(token_utils.get_position_ids().squeeze().cpu().tolist())
         DebugUtils.show_global_attention(
             tokenizer=tokenizer,
-            attention_mask=attention_mask.squeeze().cpu().tolist(), 
+            attention_mask=attention_mask.squeeze().cpu().tolist(),
             input_ids=input_ids,
             position_ids=token_utils.get_position_ids().squeeze().cpu().tolist(),
             block=BLOCK,
@@ -1135,7 +1241,7 @@ def _prefill_w_prompt_compression(
     # 3. forward
     model_output = model(
         input_ids=torch.as_tensor(
-            [input_ids], device="cuda"
+            [input_ids], device=token_utils.input_ids.device
         ),
         attention_mask=attention_mask,
         past_key_values=past_key_values,
@@ -1152,7 +1258,7 @@ def _prefill_w_prompt_compression(
             DebugUtils.show_global_attention(
                 tokenizer=tokenizer,
                 attention_mask=attn_utils.cur_attn[0:attn_utils.last_idx, 0:attn_utils.last_idx].cpu().tolist(),
-                # attention_mask=attention_mask.squeeze().cpu().tolist(), 
+                # attention_mask=attention_mask.squeeze().cpu().tolist(),
                 input_ids=input_ids,
                 position_ids=token_utils.get_position_ids().squeeze().cpu().tolist(),
                 block=BLOCK,
@@ -1179,7 +1285,7 @@ def _prefill_w_prompt_compression(
 
 @torch.no_grad()
 def prefill(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     question:str,
@@ -1239,7 +1345,7 @@ def prefill(
 
 @torch.no_grad()
 def _token_level_generate(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     max_new_tokens: int,
@@ -1253,7 +1359,7 @@ def _token_level_generate(
     update_attention_method:str="global",
     repetition_penalty:float=1.0,
 ) -> Tuple[str, str]:
-    
+
     assert update_attention_method in ["global", "local"]
 
     new_token_counters = 0
@@ -1264,7 +1370,7 @@ def _token_level_generate(
     global_start:int = len(token_utils._whole_input_ids)
     local_start:int = len(token_utils._current_input_ids)
 
-    
+
     assert local_start == kv_utils.get_cache()._seen_tokens, \
         f"{local_start} == {kv_utils.get_cache()._seen_tokens}"
     while predicted_token_id != eos_token_id and new_token_counters < max_new_tokens:
@@ -1328,19 +1434,19 @@ def _token_level_generate(
                     indicator=None
                 )
 
-        # The line below marks the end of the mask during the reduce process, 
+        # The line below marks the end of the mask during the reduce process,
         # primarily for the purpose of reduction.
         _local_mask_end = len(token_utils._current_input_ids) + 1
         # 2. position_ids and input_ids
         input_ids, position_ids = token_utils.set_input_ids(
             new_input_ids, return_tensors=True
-        ) 
+        )
         if DEBUG:
             if update_attention_method == 'global':
                 DebugUtils.show_global_attention(
                     tokenizer=tokenizer,
                     attention_mask=attn_utils.cur_attn[0:attn_utils.last_idx, 0:attn_utils.last_idx].cpu().tolist(),
-                    # attention_mask=attention_mask.squeeze(dim=0).squeeze(dim=0).cpu().tolist(), 
+                    # attention_mask=attention_mask.squeeze(dim=0).squeeze(dim=0).cpu().tolist(),
                     input_ids=deepcopy(token_utils._whole_input_ids),
                     position_ids=deepcopy(token_utils._whole_position_ids),
                     # position_ids=token_utils.get_position_ids().squeeze().cpu().tolist(),
@@ -1352,7 +1458,7 @@ def _token_level_generate(
             else:
                 DebugUtils.show_local_attention(
                     tokenizer=tokenizer,
-                    attention_mask=attention_mask.squeeze(dim=0).squeeze(dim=0).cpu().tolist(), 
+                    attention_mask=attention_mask.squeeze(dim=0).squeeze(dim=0).cpu().tolist(),
                     input_ids=deepcopy(token_utils._current_input_ids),
                     position_ids=deepcopy(token_utils._current_position_ids),
                     # position_ids=token_utils.get_position_ids().squeeze().cpu().tolist(),
@@ -1389,14 +1495,14 @@ def _token_level_generate(
             model_output=model_output, idx=-1,token_utils=token_utils,repetition_penalty=repetition_penalty,tokenizer=tokenizer
         )
         new_token_counters += 1
-    
+
     token_utils.show_output_input_ids.append(predicted_token_id)
     # return tokenizer.decode(token_utils._whole_input_ids)
     return tokenizer.decode(token_utils.show_prompt_input_ids), tokenizer.decode(token_utils.show_output_input_ids)
 
 @torch.no_grad()
 def _sentence_level_generate(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     max_new_tokens: int,
@@ -1495,7 +1601,7 @@ def _sentence_level_generate(
                     indicator=None
                 )
 
-        # The line below marks the end of the mask during the reduce process, 
+        # The line below marks the end of the mask during the reduce process,
         # primarily for the purpose of reduction.
         _local_mask_end = len(token_utils._current_input_ids) + 1
         # 2. position_ids and input_ids
@@ -1534,7 +1640,7 @@ def _sentence_level_generate(
                 DebugUtils.show_global_attention(
                     tokenizer=tokenizer,
                     attention_mask=attn_utils.cur_attn[0:attn_utils.last_idx, 0:attn_utils.last_idx].cpu().tolist(),
-                    # attention_mask=attention_mask.squeeze(dim=0).squeeze(dim=0).cpu().tolist(), 
+                    # attention_mask=attention_mask.squeeze(dim=0).squeeze(dim=0).cpu().tolist(),
                     input_ids=deepcopy(token_utils._whole_input_ids),
                     position_ids=deepcopy(token_utils._whole_position_ids),
                     # position_ids=token_utils.get_position_ids().squeeze().cpu().tolist(),
@@ -1546,7 +1652,7 @@ def _sentence_level_generate(
             else:
                 DebugUtils.show_local_attention(
                     tokenizer=tokenizer,
-                    attention_mask=attention_mask.squeeze(dim=0).squeeze(dim=0).cpu().tolist(), 
+                    attention_mask=attention_mask.squeeze(dim=0).squeeze(dim=0).cpu().tolist(),
                     input_ids=deepcopy(token_utils._current_input_ids),
                     position_ids=deepcopy(token_utils._current_position_ids),
                     # position_ids=token_utils.get_position_ids().squeeze().cpu().tolist(),
@@ -1592,7 +1698,7 @@ def _sentence_level_generate(
 # 260309 尚未验证traditional mtp的推理准确性，最差情况与标准推理一致
 @torch.no_grad()
 def _sentence_mtp_level_generate(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     max_new_tokens: int,
@@ -1700,7 +1806,7 @@ def _sentence_mtp_level_generate(
                         indicator=None
                     )
 
-            # The line below marks the end of the mask during the reduce process, 
+            # The line below marks the end of the mask during the reduce process,
             # primarily for the purpose of reduction.
             _local_mask_end = len(token_utils._current_input_ids) + 1
             # 2. position_ids and input_ids
@@ -1734,13 +1840,13 @@ def _sentence_mtp_level_generate(
                 position_ids = token_utils.use_epl_for_compression(position_ids, indicator)
                 use_compression_all_count += len(comp_config.get_output_comp_token_id(cot_length=(cot_end - cot_start)))
                 cot_start = cot_end + 1
-            
+
             if DEBUG:
                 if update_attention_method == 'global':
                     DebugUtils.show_global_attention(
                         tokenizer=tokenizer,
                         attention_mask=attn_utils.cur_attn[0:attn_utils.last_idx, 0:attn_utils.last_idx].cpu().tolist(),
-                        # attention_mask=attention_mask.squeeze(dim=0).squeeze(dim=0).cpu().tolist(), 
+                        # attention_mask=attention_mask.squeeze(dim=0).squeeze(dim=0).cpu().tolist(),
                         input_ids=deepcopy(token_utils._whole_input_ids),
                         position_ids=deepcopy(token_utils._whole_position_ids),
                         # position_ids=token_utils.get_position_ids().squeeze().cpu().tolist(),
@@ -1752,7 +1858,7 @@ def _sentence_mtp_level_generate(
                 else:
                     DebugUtils.show_local_attention(
                         tokenizer=tokenizer,
-                        attention_mask=attention_mask.squeeze(dim=0).squeeze(dim=0).cpu().tolist(), 
+                        attention_mask=attention_mask.squeeze(dim=0).squeeze(dim=0).cpu().tolist(),
                         input_ids=deepcopy(token_utils._current_input_ids),
                         position_ids=deepcopy(token_utils._current_position_ids),
                         # position_ids=token_utils.get_position_ids().squeeze().cpu().tolist(),
@@ -1791,7 +1897,7 @@ def _sentence_mtp_level_generate(
 
             debug_count += 1
             new_token_counters += 1
-        
+
         if new_input_ids == eos_token_id:
                 break
         if not IS_COMP_MODE:
@@ -1927,11 +2033,11 @@ def mtp_generate_and_validate(model, last_hidden_state, input_ids, attention_mas
 # mtp register generate最快实现版本
 # 无法和普通sentence_level_generate做到完全一致，因为：
 # 1.数值精度
-# 2.多token和单token存在计算差异计算 
+# 2.多token和单token存在计算差异计算
 # 导致某些位置（例如 to 和 for）logit差异过小而选择了不同的token
 @torch.no_grad()
 def _sentence_level_mtp_register_generate(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     max_new_tokens: int,
@@ -2060,7 +2166,7 @@ def _sentence_level_mtp_register_generate(
                         indicator=None,
                     )
 
-            # The line below marks the end of the mask during the reduce process, 
+            # The line below marks the end of the mask during the reduce process,
             # primarily for the purpose of reduction.
             _local_mask_end = len(token_utils._current_input_ids) + 1
             # 2. position_ids and input_ids
@@ -2095,7 +2201,7 @@ def _sentence_level_mtp_register_generate(
                 position_ids = token_utils.use_epl_for_compression(position_ids, indicator)
                 use_compression_all_count += len(comp_config.get_output_comp_token_id(cot_length=(cur_split_end - cot_start)))
                 cot_start = cur_split_end + 1
-                
+
                 # step2: 这里补齐register token位置编码
                 if register_token_count > 0:
                     last_pos = int(position_ids[0, -1].item())
@@ -2256,7 +2362,7 @@ def _sentence_level_mtp_register_generate(
                         kv_utils.reduce_cache(start=trim_start, end=trim_end)
                         token_utils.reduce_input_ids(start=trim_start, end=trim_end)
                         accepted_len = effective_accepted_len
-                    
+
 
                     for tok in extra_accepted:
                         token_utils.show_output_input_ids.append(tok)
@@ -2282,7 +2388,7 @@ def _sentence_level_mtp_register_generate(
 
 @torch.no_grad()
 def generate(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     question:str,
@@ -2402,7 +2508,7 @@ def generate(
             #     mtp_depth=mtp_depth,
             #     aux_config=aux_config
             # )
-    
+
     del kv_utils
     return prompt, output
 
@@ -2437,7 +2543,7 @@ def get_parser():
 
     parser.add_argument('--split_size', type=int)
     # start from 1
-    parser.add_argument('--index', type=int)        
+    parser.add_argument('--index', type=int)
     parser.add_argument('--use_EPL', type=str2bool, default=False)
     parser.add_argument('--aux_config', type=str, default=None)
     parser.add_argument('--use_h2o', type=str2bool, default=True)
@@ -2456,10 +2562,10 @@ def get_parser():
     return args
 
 def get_model_and_tokenizer(
-    args, 
+    args,
     comp_config:Config
 ) -> Tuple[
-    Union[Qwen2ForCausalLM, LlamaForCausalLM],
+    Union[Qwen3ForCausalLM, LlamaForCausalLM],
     Tokenizer
 ]:
     if args.model_path == None or args.model_path == "":
@@ -2483,8 +2589,19 @@ def get_model_and_tokenizer(
         tokenizer.add_special_token(special_token_list)
 
     if args.model_type.lower() == 'qwen':
-        model = Qwen2ForCausalLM.from_pretrained(
-            model_path, torch_dtype=torch.bfloat16, device_map="auto"
+        tokenizer.validate_qwen3()
+        model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        if model_config.model_type != "qwen3":
+            raise ValueError(
+                f"Expected a Qwen3 checkpoint, but `{model_path}` has "
+                f"model_type={model_config.model_type!r}."
+            )
+        model = Qwen3ForCausalLM.from_pretrained(
+            model_path,
+            config=model_config,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            attn_implementation="eager",
         )
     elif args.model_type.lower() == 'llama':
         model = LlamaForCausalLM.from_pretrained(
@@ -2492,12 +2609,12 @@ def get_model_and_tokenizer(
         )
 
     comp_config.convert2id(tokenizer)
-    
+
     return model, tokenizer
 
 @torch.no_grad()
 def eval_dataset(
-    model:Union[Qwen2ForCausalLM, LlamaForCausalLM],
+    model:Union[Qwen3ForCausalLM, LlamaForCausalLM],
     tokenizer:Tokenizer,
     reader:Reader,
     comp_config:Config,
@@ -2542,7 +2659,7 @@ def eval_dataset(
     print(f"Starting test for `{dataset_name}`. Total size is {len(reader)}. Now, {index}/{split_size}: {start}-{end}")
 
     pbar = tqdm(total=end-start)
-    
+
     output_dir = os.path.dirname(output_file)
     if not os.path.exists(output_dir):
         try:
@@ -2600,7 +2717,7 @@ def eval_dataset(
             pbar.set_description(f"model:`{model_answer}`; gt:`{gt_answer}`; correct:{acc_state}; acc: {acc}/{total}={round(acc/total, 5)}; input: {input_len}; output: {output_len}; `{comp_pattern}`; max_token: {max_token}")
             pbar.update(1)
         # ====================
-        
+
         for i in range(start, end):
             total += 1
             question:str = reader.get_prompt(idx=i)
@@ -2635,13 +2752,13 @@ def eval_dataset(
             end_time = time.time()
             input_len:int = len(token_utils.show_prompt_input_ids)
             output_len:int = len(token_utils.show_output_input_ids)
-            
+
             model_answer:str = reader.extract_answer(output)
             gt_answer:str = reader.get_answer(i)
             acc_state, comp_pattern = reader.compare_answer(model_answer, gt_answer, i)
             if acc_state == True:
                 acc += 1
-                
+
             writer.write(dict(
                 idx=i,
                 model_answer=model_answer,
@@ -2716,7 +2833,7 @@ def main():
     }
 
     task_list = [(all_tasks[name], name) for name in args.datasets if name in all_tasks]
-    
+
     # 打印要评估的数据集
     print(f"\n{'='*60}")
     print(f"Evaluating datasets: {', '.join(args.datasets)}")

@@ -1,9 +1,9 @@
 
-model_path="/mnt/jinbo/RLRM/model/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+model_path="Qwen/Qwen3-8B"
 datasets="gpqa"
 batch_size=8
 output_dir="./sglang_inference_results"
-extend_name="7b"
+extend_name="qwen3_8b"
 
 root_dir="./LightThinker"
 

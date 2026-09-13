@@ -5,6 +5,7 @@ import jsonlines
 from typing import *
 from tqdm import tqdm
 import os
+from pathlib import Path
 
 from utils import _print, read_jsonl
 from LightThinker import Tokenizer, Config
@@ -12,7 +13,8 @@ from constant import CLASS_NORMAL, CLASS_CACHE, CLASS_ANCHOR, CLASS_TOKEN
 
 class Reference:
 
-    PATH_TEMPLATE = "./data/eval/{name}.jsonl"
+    PROJECT_ROOT = Path(__file__).resolve().parents[1]
+    PATH_TEMPLATE = str(PROJECT_ROOT / "data/eval/{name}.jsonl")
 
     def __init__(self, dataset_name:str, interaction:bool):
         self.dataset_name = dataset_name
@@ -21,12 +23,12 @@ class Reference:
             self.PATH_TEMPLATE.format(name=dataset_name)
         )
         self.interaction:bool = interaction
-    
+
     def _digit_compare(self, model_ans:str, gt_ans:str):
         if model_ans.isdigit() and gt_ans.isdigit():
             if model_ans != gt_ans:
                 return False
-        
+
         for item in [model_ans, gt_ans]:
             for i in item:
                 if i not in "0123456789.-+":
@@ -69,13 +71,13 @@ class Reference:
                     print(f"does `{model_ans}` equal to `{self.meta_data_list[idx]['answer']}`: ")
                 else:
                     print("Please enter yes or no!")
-    
+
     def get_domain(self, idx:int):
         if self.dataset_name == 'bbh':
             return self.meta_data_list[idx]['meta_info']['domain']
         elif self.dataset_name == 'mmlu':
             return self.meta_data_list[idx]['meta_info']['domain']
-    
+
     def update(self):
         _print(f"updating {self.PATH_TEMPLATE.format(name=self.dataset_name)} ...")
         with jsonlines.open(self.PATH_TEMPLATE.format(name=self.dataset_name), 'w') as writer:
@@ -114,10 +116,10 @@ class Evaluator:
                 self.eval_data_list.append(item)
 
     def _cal_attend(
-        self, 
-        len_prompt:int, 
-        len_output:int, 
-        cache_size:int, 
+        self,
+        len_prompt:int,
+        len_output:int,
+        cache_size:int,
         output_id_list:List[int],
     ) -> Tuple[int, List[int]]:
 
@@ -173,7 +175,7 @@ class Evaluator:
         else:
             # 如果没有提供 model_tag，使用旧路径格式（向后兼容）
             base_path = f'eval_results/{self.args.method}/{self.args.model_type}/{self.args.dataset}'
-        
+
         if len(metrics['compress_list']) != 0:
             freq_path = f'{base_path}/frequency.jsonl'
             if not os.path.exists(freq_path):
@@ -182,10 +184,6 @@ class Evaluator:
                 writer.write(dict(
                     value=metrics['compress_list']
                 ))
-        if metrics['compressed_token_total'] > 0:
-            compress_ratio = round(metrics['cot_token_total'] / metrics['compressed_token_total'], 4)
-        else:
-            compress_ratio = 0.0
         result_list = [
             (f'{"="*30} {self.args.dataset} {"="*30}'),
             (f"acc: {metrics['correct']}/{metrics['total']}"),
@@ -196,9 +194,7 @@ class Evaluator:
             (f"total len: {self.avg(metrics['total_len_list'])}"),
             (f"peak mem: {self.avg(metrics['peak_mem_list'])}"),
             (f"compress: {self.avg(metrics['compress_cnt_list'])}"),
-            (f"compress ratio: {compress_ratio}"),
-            (f"cot/compressed: {metrics['cot_token_total']}/{metrics['compressed_token_total']}"),
-            (f"{round(metrics['correct']/metrics['total']*100, 2)},{round(sum(metrics['infer_time_list'])/3600, 2)},{int(round(self.avg(metrics['attend_list']),0))},{int(round(self.avg(metrics['output_len_list']), 0))},{int(round(self.avg(metrics['peak_mem_list']),0))},{int(round(self.avg(metrics['compress_cnt_list']),0))},{compress_ratio}"),
+            (f"{round(metrics['correct']/metrics['total']*100, 2)},{round(sum(metrics['infer_time_list'])/3600, 2)},{int(round(self.avg(metrics['attend_list']),0))},{int(round(self.avg(metrics['output_len_list']), 0))},{int(round(self.avg(metrics['peak_mem_list']),0))},{int(round(self.avg(metrics['compress_cnt_list']),0))}"),
         ]
         result_path = f'{base_path}/result.txt'
         if not os.path.exists(result_path):
@@ -206,7 +202,7 @@ class Evaluator:
         with open(result_path, 'w') as f:
             for line in result_list:
                 f.write(line + '\n')
-        return "\n".join(result_list)   
+        return "\n".join(result_list)
 
     def print_metrics(self, metrics:Dict):
         print(self.metrics2str(metrics))
@@ -246,8 +242,6 @@ class Evaluator:
             output_len_list=list(),
             total_len_list=list(),
             compress_list=list(),
-            cot_token_total=0,
-            compressed_token_total=0,
         )
 
         pbar = tqdm(total=len(self.eval_data_list))
@@ -280,6 +274,11 @@ class Evaluator:
             prompt_len:int = len(self.tokenizer.tokenizer(prompt, return_tensors=None)['input_ids'])
             output_id_list:List[int] = self.tokenizer.tokenizer(output, return_tensors=None)['input_ids']
             output_len = len(output_id_list)
+            # assert prompt_len == (item['prompt_len'] if 'prompt_len' in item else item['input_len']),\
+            #     f"{prompt_len} != {(item['prompt_len'] if 'prompt_len' in item else item['input_len'])}"
+            # print(output_len, [item['output_len'], prompt_len, item['output_len'] + prompt_len])
+            # assert output_len in [item['output_len'], item['output_len'] + prompt_len], \
+            #     f"{output_len} in {[item['output_len'], item['output_len'] + prompt_len]}"
 
             if self.args.method in CLASS_CACHE:
                 metrics['peak_mem_list'].append(self.args.cache_size)
@@ -289,21 +288,24 @@ class Evaluator:
                         self._cal_max_token(output_id_list, prompt_len)
                     )
                 else:
+                    # print(f"{self._cal_max_token(output_id_list, prompt_len)} != {item['max_token']}")
+                    # input("hh")
+                    # assert self._cal_max_token(output_id_list, prompt_len) == item['max_token'], \
+                    #     f"{self._cal_max_token(output_id_list, prompt_len)} != {item['max_token']}"
                     metrics['peak_mem_list'].append(item['max_token'])
             elif self.args.method in CLASS_NORMAL:
-                metrics['peak_mem_list'].append(output_len + prompt_len)
+                metrics['peak_mem_list'].append(output_len+prompt_len)
             else:
                 assert False
 
-            # anchor-thought 下，把 splitter 从 output_len 中排除
+
             if self.args.method in CLASS_ANCHOR:
                 output_len = output_len - output.count(self.splitter)
-
             metrics['prompt_len_list'].append(prompt_len)
             metrics['output_len_list'].append(output_len)
-            metrics['total_len_list'].append(output_len + prompt_len)
+            metrics['total_len_list'].append(output_len+prompt_len)
 
-            # 3. Attend
+            # 3. Attend (i.e., dependency)
             attend, frequency = self._cal_attend(
                 len_prompt=prompt_len,
                 len_output=output_len,
@@ -314,24 +316,14 @@ class Evaluator:
             if len(frequency) != 0:
                 metrics['compress_list'].extend(frequency)
 
-            # 4. Infer time
+            # 4. Infer_time
             metrics['infer_time_list'].append(item['infer_time'])
 
-            # 5. Compress count + compress_ratio 统计
-            comp_events = 0
+            # 5. Compress Cnt
             if self.args.method in CLASS_ANCHOR:
-                comp_events = output.count(self.splitter)
-                metrics['compress_cnt_list'].append(comp_events)
-            elif self.args.method in CLASS_TOKEN:
-                comp_events = len(output_id_list) // self.comp_config.output_comp_step
-                metrics['compress_cnt_list'].append(comp_events)
-
-            # 按你的定义:
-            # 分子 = 全部输出 CoT token 数（使用 output_len，anchor 已去掉 splitter）
-            # 分母 = 全部压缩 token 数（压缩次数 * 每次压缩token数）  
-            if self.args.method in (CLASS_ANCHOR + CLASS_TOKEN):
-                metrics['cot_token_total'] += output_len
-                metrics['compressed_token_total'] += comp_events * self.compress_cnt
+                metrics['compress_cnt_list'].append(output.count(self.splitter))
+            if self.args.method in CLASS_TOKEN:
+                metrics['compress_cnt_list'].append(len(output_id_list) // self.comp_config.output_comp_step)
 
         if not return_metrics:
             self.print_metrics(metrics)
@@ -342,8 +334,8 @@ def get_parser():
     parser = argparse.ArgumentParser(description="")
 
     parser.add_argument(
-        '--method', 
-        type=str, 
+        '--method',
+        type=str,
         choices=['anchor-token', 'normal', 'kvcache', 'anchor-thought']
     )
 
@@ -388,6 +380,9 @@ def get_tokenizer_and_config(args) -> Tuple[Tokenizer, Config]:
     if len(special_token_list) > 0:
         tokenizer.add_special_token(special_token_list)
 
+    if args.model_type == "qwen":
+        tokenizer.validate_qwen3()
+
     comp_config.convert2id(tokenizer)
 
     return tokenizer, comp_config
@@ -419,8 +414,7 @@ def main():
         reference=reference,
     )
     print(evaluator.eval(return_metrics=True))
-    
+
 
 if __name__ == '__main__':
     main()
-

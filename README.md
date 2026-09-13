@@ -48,6 +48,11 @@ source /mnt/zhaorunsong/anaconda3/etc/profile.d/conda.sh
 
 ## 🔧Installation
 
+This branch targets `Qwen/Qwen3-8B` with H2O KV-cache pruning. Use the
+tokenizer from the same Qwen3 checkpoint; Qwen2/Qwen2.5 tokenizers and model
+checkpoints are rejected at startup. H2O requires `eager` attention during
+inference so that heavy-hitter scores can be accumulated.
+
 ```bash
 git clone https://github.com/helldog-star/RRcot
 cd RRcot
@@ -55,6 +60,18 @@ conda create -n lightthinker python=3.9 -y
 conda activate lightthinker
 pip install -r requirements.txt
 cd data && unzip data.zip && cd ..
+```
+
+Run the Qwen3-8B + H2O example on one GPU:
+
+```bash
+bash pipeline.sh
+
+# Local checkpoint / custom cache budget:
+MODEL_PATH=/path/to/Qwen3-8B \
+H2O_WINDOW_LENGTH=2048 \
+H2O_NUM_HH_TOKENS=1024 \
+bash pipeline.sh
 ```
 
 
@@ -129,7 +146,7 @@ Please note that if you set `split_size>1` in the second step, the number of fil
 ```bash
 # The optional values for the method argument are 'anchor-token', 'normal', 'kvcache', and 'anchor-thought'.
 method="anchor-thought"
-tokenizer_path="Qwen/Qwen2.5-7B-Instruct"
+tokenizer_path="Qwen/Qwen3-8B"
 comp_config="configs/LightThinker/qwen/v1.json"
 model_type="qwen"
 dataset="gpqa"
@@ -161,4 +178,3 @@ python evaluation/eval_file.py \
 
 When string matching fails, the output will be displayed in the format "Model Answer" <=> "Standard Answer". At this point, you can input "y" or "n" to evaluate this case. If you believe the model's answer extraction is incorrect, you can input "e" to print the model's complete output, and then input "y" or "n" to evaluate this case.
 </details>
-

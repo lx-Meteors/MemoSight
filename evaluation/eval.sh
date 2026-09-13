@@ -1,6 +1,6 @@
 # The optional values for the method argument are 'anchor-token', 'normal', 'kvcache', and 'anchor-thought'.
 method="anchor-thought"
-tokenizer_path="Qwen/Qwen2.5-7B-Instruct"
+tokenizer_path="Qwen/Qwen3-8B"
 comp_config="configs/LightThinker/qwen/v1.json"
 model_type="qwen"
 dataset="gpqa"
@@ -23,4 +23,4 @@ python eval_file.py \
   --cache_size $cache_size \
   --bos_token $bos_token \
   --eos_token $eos_token \
-#   --interaction 
+#   --interaction
