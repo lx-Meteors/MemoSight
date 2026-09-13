@@ -1,7 +1,7 @@
 # model
 model_type="qwen"
-tokenizer_path="Qwen/Qwen2.5-7B-Instruct"
-model_path="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+tokenizer_path="Qwen/Qwen3-8B"
+model_path="Qwen/Qwen3-8B"
 bos_token="<|im_start|>"
 eos_token="<|im_end|>"
 conf_version="v1"
@@ -20,7 +20,7 @@ mode="aug-wo-pc"
 warmup_steps=0
 
 # others
-model_size="7b"
+model_size="qwen3_8b"
 init_tag=""
 train_path="./data/train/train.jsonl"
 see_current="true"

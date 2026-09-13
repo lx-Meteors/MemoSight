@@ -126,7 +126,7 @@ class Config:
             self.register_token_desp
         ]
 
-        # 为qwen2.5
+        # Qwen3 chat template tokens
         if self.template_cfg['model'] == 'qwen':
             self.bos_token = "<|im_start|>"
             self.bos_token_desp = "<|im_start|>"
@@ -253,4 +253,3 @@ class Config:
         else:
             return self.output_comp_token_id_list
     
-

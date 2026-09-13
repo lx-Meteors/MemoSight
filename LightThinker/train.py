@@ -8,9 +8,9 @@ import torch
 from typing import *
 from tqdm import tqdm
 from copy import deepcopy
-from model_qwen import Qwen2ForCausalLM
+from model_qwen import Qwen3ForCausalLM
 from model_llama import LlamaForCausalLM
-from transformers import Trainer, TrainingArguments, set_seed as hf_set_seed
+from transformers import AutoConfig, Trainer, TrainingArguments, set_seed as hf_set_seed
 from transformers import TrainerCallback
 from transformers.integrations import TensorBoardCallback
 
@@ -177,7 +177,7 @@ def get_parser():
 def get_model_and_tokenizer(
     args,
     comp_config:Config
-) -> Tuple[Union[Qwen2ForCausalLM, LlamaForCausalLM], Tokenizer, Any]:
+) -> Tuple[Union[Qwen3ForCausalLM, LlamaForCausalLM], Tokenizer, Any]:
 
     special_token_list:List[str] = list()
     special_token_desp_dict = dict()
@@ -200,14 +200,20 @@ def get_model_and_tokenizer(
     if args.model_type == 'llama':
         model_class = LlamaForCausalLM
     elif args.model_type == 'qwen':
-        model_class = Qwen2ForCausalLM
+        model_class = Qwen3ForCausalLM
+        tokenizer.validate_qwen3()
     else:
         assert False, "We only support llama and qwen model."
 
+    model_config = AutoConfig.from_pretrained(args.model_path, trust_remote_code=True)
+    if args.model_type == 'qwen' and model_config.model_type != "qwen3":
+        raise ValueError(
+            f"Expected a Qwen3 checkpoint, but `{args.model_path}` has "
+            f"model_type={model_config.model_type!r}."
+        )
+
     if comp_config.mtp_cfg:
         _print(f"use ce + mtp loss...")
-        from transformers import AutoConfig
-        model_config = AutoConfig.from_pretrained(args.model_path, trust_remote_code=True)
         mtp_params = comp_config.mtp_cfg
         _print(f"mtp config={mtp_params}")
 
@@ -218,15 +224,15 @@ def get_model_and_tokenizer(
     else:
         _print(f"use ce loss...")
         model = model_class.from_pretrained(
-            args.model_path, torch_dtype=torch.bfloat16
+            args.model_path, config=model_config, torch_dtype=torch.bfloat16
         )
 
     hook_handle = model.register_forward_hook(capture_loss_hook)
     
     model.add_qkv(
-        q='q' in args.qkv,
-        k='k' in args.qkv,
-        v='v' in args.qkv,
+        q='q' in args.qkv or bool(getattr(model.config, "lightthinker_new_q", False)),
+        k='k' in args.qkv or bool(getattr(model.config, "lightthinker_new_k", False)),
+        v='v' in args.qkv or bool(getattr(model.config, "lightthinker_new_v", False)),
     )
 
     if model.model.config.vocab_size != len(tokenizer):

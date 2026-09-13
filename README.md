@@ -35,9 +35,13 @@
 
 ## 🔧Installation
 
+This branch targets `Qwen/Qwen3-8B` for Chain-of-Thought inference and
+training. The model and tokenizer must come from the same Qwen3 checkpoint;
+Qwen2/Qwen2.5 checkpoints are rejected at startup.
+
 ```bash
-git clone https://github.com/helldog-star/RRcot
-cd RRcot
+git clone -b CoT-Qwen3 https://github.com/lx-Meteors/MemoSight.git
+cd MemoSight
 conda create -n lightthinker python=3.9 -y
 conda activate lightthinker
 pip install -r requirements.txt
@@ -95,31 +99,32 @@ bash scripts/pipeline.sh -h
 ```bash
 bash scripts/pipeline.sh \
   --stage train \
-  --exp_tag vanilla_qwen \
-  --output_base_dir /mnt/lxy/RRcot/experiments \
+  --exp_tag cot_qwen3_8b \
+  --output_base_dir ./experiments \
   --use_epl false \
   --lr 1e-5 \
   --mode normal \
   --model_type qwen \
-  --tokenizer_path /mnt/lxy/hf_models/Qwen2.5-1.5B-Instruct \
-  --model_path /mnt/lxy/hf_models/DeepSeek-R1-Distill-Qwen-1.5B \
-  --train_data_path /mnt/lxy/RRcot/data/train/train_debug.jsonl \
+  --tokenizer_path Qwen/Qwen3-8B \
+  --model_path Qwen/Qwen3-8B \
+  --train_data_path /path/to/train.jsonl \
   --train_gpus 0,1,2,3
 ```
 
-### 示例 2：仅推理（自动使用最新 checkpoint）
+### 示例 2：直接使用 Qwen3-8B 进行 CoT 推理
 
 ```bash
 bash scripts/pipeline.sh \
   --stage infer \
-  --exp_tag vanilla_qwen \
-  --output_base_dir /mnt/lxy/RRcot/experiments \
+  --exp_tag cot_qwen3_8b_infer \
+  --output_base_dir ./experiments \
   --use_epl false \
   --model_type qwen \
-  --tokenizer_path /mnt/lxy/hf_models/Qwen2.5-1.5B-Instruct \
-  --target_gpus 0,1,2,3 \
+  --tokenizer_path Qwen/Qwen3-8B \
+  --model_path Qwen/Qwen3-8B \
+  --target_gpus 0 \
   --process_per_gpu 1 \
-  --datasets mmlu,gsm8k,gpqa,bbh
+  --datasets gsm8k
 ```
 
 ### 示例 3：全流程（train + infer + eval）
@@ -127,15 +132,15 @@ bash scripts/pipeline.sh \
 ```bash
 bash scripts/pipeline.sh \
   --stage all \
-  --exp_tag vanilla_qwen \
-  --output_base_dir /mnt/lxy/RRcot/experiments \
+  --exp_tag cot_qwen3_8b \
+  --output_base_dir ./experiments \
   --use_epl false \
   --lr 1e-5 \
   --mode normal \
   --model_type qwen \
-  --tokenizer_path /mnt/lxy/hf_models/Qwen2.5-1.5B-Instruct \
-  --model_path /mnt/lxy/hf_models/DeepSeek-R1-Distill-Qwen-1.5B \
-  --train_data_path /mnt/lxy/RRcot/data/train/train_debug.jsonl \
+  --tokenizer_path Qwen/Qwen3-8B \
+  --model_path Qwen/Qwen3-8B \
+  --train_data_path /path/to/train.jsonl \
   --train_gpus 0,1,2,3 \
   --target_gpus 0,1,2,3 \
   --process_per_gpu 1 \
@@ -172,4 +177,3 @@ bash scripts/pipeline.sh \
 
 3. 参数拼写错误导致脚本退出  
 可先执行 `bash scripts/pipeline.sh -h`，确认参数名与取值。
-

@@ -5,10 +5,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # ---------- 可按需覆盖的默认参数 ----------
-MODEL_PATH="${MODEL_PATH:-/mnt/lxy/hf_models/Qwen2.5-1.5B-Instruct}"
+MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-8B}"
 TOKENIZER_PATH="${TOKENIZER_PATH:-${MODEL_PATH}}"
 EXP_TAG="${EXP_TAG:-instruction_demo_infer}"
-OUTPUT_BASE_DIR="${OUTPUT_BASE_DIR:-/mnt/lxy/RRcot/experiments}"
+OUTPUT_BASE_DIR="${OUTPUT_BASE_DIR:-${ROOT_DIR}/experiments}"
 COMP_CONFIG="${COMP_CONFIG:-configs/LightThinker/qwen/v1.json}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-10240}"
 USE_EPL="${USE_EPL:-false}"

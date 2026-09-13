@@ -1012,7 +1012,7 @@ class MyDataCollator:
 if __name__ == '__main__':
 
     config_path = "/mnt/lxy/RRcot/configs/LightThinker/qwen/apa_mtp.json"
-    tokenizer_path = "/mnt/zhaorunsong/models/Qwen2.5-0.5B-Instruct"
+    tokenizer_path = "Qwen/Qwen3-8B"
     dataset_path = "/mnt/lxy/RRcot/data/train/train_debug.jsonl"
 
     
@@ -1100,4 +1100,3 @@ if __name__ == '__main__':
             position_ids=batch['position_ids'][bsz_id].tolist() if 'position_ids' in batch else None
         )
     )
-

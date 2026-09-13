@@ -8,14 +8,14 @@ import numpy as np
 from typing import *
 from tqdm import tqdm
 from copy import deepcopy
-from transformers import AutoTokenizer, DynamicCache, GenerationConfig
+from transformers import AutoConfig, AutoTokenizer, DynamicCache, GenerationConfig
 
 from dataset_reader import GPQAReader, MMLUReader, BBHReader, GSM8KReader, Reader
 from config import Config
 from utils import *
 from tokenizer import Tokenizer
 from model_llama import LlamaForCausalLM
-from model_qwen import Qwen2ForCausalLM
+from model_qwen import Qwen3ForCausalLM
 
 DEBUG:bool=False
 BLOCK:bool=False
@@ -38,9 +38,9 @@ class DebugUtils:
 
     @classmethod
     def show_global_attention(
-        cls, 
+        cls,
         tokenizer:Tokenizer,
-        attention_mask:List[List[Union[bool, float]]], 
+        attention_mask:List[List[Union[bool, float]]],
         input_ids:List[int],
         position_ids:List[int]=None,
         block:bool=False,
@@ -63,7 +63,7 @@ class DebugUtils:
             input_ids = input_ids[start_offset:end_offset]
             if position_ids != None:
                 position_ids = position_ids[start_offset:end_offset]
-        
+
         # True -> don't mask
         # False -> mask
         for i in range(len(attention_mask)):
@@ -81,7 +81,7 @@ class DebugUtils:
         position_ids.append(-1)
         xlabel = ['\n' + l for l in label]
         ylabel = ["\n" + ("" if position_ids == None else f"({position_ids[idx]})") + l for idx, l in enumerate(label)]
-        
+
         cmap = mcolors.ListedColormap(['lightgray', 'yellow'])
         plt.imshow(attention_mask, cmap=cmap)
         plt.grid(which='both', color='gray', linestyle='-', linewidth=0.5)
@@ -122,7 +122,7 @@ class DebugUtils:
             input_ids = input_ids[start_offset:end_offset]
             if position_ids != None:
                 position_ids = position_ids[start_offset:end_offset]
-        
+
         # True -> don't mask
         # False -> mask
         for i in range(len(attention_mask)):
@@ -160,7 +160,7 @@ class InferenceUtils:
     @classmethod
     def get_predicted_token_ids(cls, model_output, idx:int=-1) -> int:
         # [bs, seq_length, vocab_size]
-        logits = model_output.logits    
+        logits = model_output.logits
         # [vocab_size]
         target_logits = logits[0, idx, :]
         predicted_token_ids: int = torch.argmax(target_logits).item()
@@ -169,15 +169,15 @@ class InferenceUtils:
         #     if cls.cnt % cls.step == 0:
         #         assert cls.split_token_id != None
         #         return cls.split_token_id
-            
+
         return predicted_token_ids
 
 class AttentionUtils:
 
     def __init__(
-        self, 
-        max_length:int, 
-        device:str, 
+        self,
+        max_length:int,
+        device:str,
         dtype,
         attention_config:Dict,
         prefill_compress:bool,
@@ -199,7 +199,7 @@ class AttentionUtils:
             ),
             diagonal=1
         )
-        
+
         self.delta_attn = torch.full(
             (max_comp_size + n_inst + n_continue + 1, max_length), fill_value=0., dtype=self.dtype, device=self.device
         )
@@ -212,15 +212,15 @@ class AttentionUtils:
         )
 
         self.copy_line = torch.full((max_length,), fill_value=0., dtype=self.dtype, device=self.device)
-        
+
         self.mask_value = self.min_dtype
         self.show_value = 0.
-        
+
         self.last_idx = 0
 
         self.diagonal_attn = torch.full((max_comp_size, max_comp_size), self.mask_value)
         self.diagonal_attn.fill_diagonal_(self.show_value)
-        
+
         self.global_indicator_list:List[List[int]] = list()
 
     def create_prompt_attention(
@@ -254,7 +254,7 @@ class AttentionUtils:
 
             # Step 1.
             self.cur_attn[
-                comp_end:length, 
+                comp_end:length,
                 text_start:text_end
             ] = self.mask_value
 
@@ -264,7 +264,7 @@ class AttentionUtils:
                     comp_start:comp_end,
                     0:text_start
                 ] = self.mask_value
-            
+
             # Step 3.
             if bi_attention:
                 self.cur_attn[
@@ -290,7 +290,7 @@ class AttentionUtils:
         diagonal = self.attention_config['diagonal']
         see_current = self.attention_config['see_current']
         bi_attention = self.attention_config['bi_attention']
-        
+
         assert self.prefill_compress == False
         for indicator in indicator_list:
             text_start, text_end, n_inst, comp_start, comp_end, n_cont = indicator
@@ -311,7 +311,7 @@ class AttentionUtils:
                     comp_start:comp_end,
                     0:text_start
                 ] = self.max_value
-            
+
             # Step 3
             if bi_attention:
                 self.cur_attn[
@@ -342,7 +342,7 @@ class AttentionUtils:
             self.last_idx:self.last_idx+new_length,
             0:self.last_idx
         ] = self.copy_line[0:self.last_idx]
-        
+
         # Step 2.
         if indicator != None:
             self.global_indicator_list.append(indicator)
@@ -358,13 +358,13 @@ class AttentionUtils:
                     comp_start:comp_end,
                     0:text_start
                 ] = self.mask_value
-            
+
             if bi_attention:
                 self.cur_attn[
                     comp_start:comp_end,
                     comp_start:comp_end,
                 ] = self.show_value
-            
+
             if diagonal:
                 self.cur_attn[
                     comp_start:comp_end,
@@ -373,7 +373,7 @@ class AttentionUtils:
                     0:comp_end-comp_start,
                     0:comp_end-comp_start,
                 ]
-            
+
             if n_cont == 1:
                 self.copy_line[:] = self.cur_attn[self.last_idx+new_length-1, :]
             elif n_cont == 0:
@@ -389,7 +389,7 @@ class AttentionUtils:
 
         # Step 3.
         self.delta_attn[:] = self.show_value
-        remove_size = 0 
+        remove_size = 0
         if indicator != None:
             for _indicator in self.global_indicator_list[0:-1]:
                 text_start, text_end, n_inst, comp_start, comp_end, n_cont = _indicator
@@ -400,14 +400,14 @@ class AttentionUtils:
             comp_start -= remove_size
             comp_end -= remove_size
             n_prefix = new_length - (comp_end - comp_start + n_cont)
-            
+
             save_length = self.last_idx - remove_size
             self.delta_attn[
-                0:new_length, 
+                0:new_length,
                 text_start:save_length
             ] = \
                 self.cur_attn[
-                    self.last_idx - new_length: self.last_idx, 
+                    self.last_idx - new_length: self.last_idx,
                     text_start+remove_size:self.last_idx
                 ]
             # 让
@@ -460,7 +460,7 @@ class AttentionUtils:
                     comp_start_r:comp_end_r,
                     comp_start_c:comp_end_c
                 ] = self.show_value
-            
+
             if diagonal:
                 self.delta_attn[
                     comp_start_r:comp_end_r,
@@ -469,9 +469,9 @@ class AttentionUtils:
                     0:comp_end_r-comp_start_r,
                     0:comp_end_r-comp_start_r,
                 ]
-        
+
         return self.delta_attn[0:new_length, 0:origin_length+new_length].unsqueeze(dim=0).unsqueeze(dim=0)
-        
+
     def reset(self):
         self.cur_attn[:, :] = self.base_attn[:, :]
         self.last_idx = 0
@@ -494,10 +494,10 @@ class KVUtils:
     def reduce_cache(self, start:int, end:int):
         assert end <= self.past_key_values._seen_tokens
         assert self.past_key_values._seen_tokens == self.past_key_values.key_cache[0].shape[2]
-        # 1. 
+        # 1.
         self.past_key_values._seen_tokens -= (end-start)
 
-        # 2. 
+        # 2.
         bsz, n_head, q_length, head_dim = self.past_key_values.key_cache[0].shape
         new_q_length = q_length - (end-start)
         assert self.past_key_values._seen_tokens == new_q_length
@@ -560,7 +560,7 @@ class TokenUtils:
             if end < 0:
                 end = self._seen_tokens + end
             return self.input_ids[..., start:end]
-    
+
     def get_input_ids(self, idx:int) -> torch.Tensor:
         if idx >= 0:
             return self.input_ids[..., idx:idx+1]
@@ -580,7 +580,7 @@ class TokenUtils:
             new_pos = len(self._current_position_ids)
         else:
             new_pos = self._whole_position_ids[-1] + 1
-    
+
         self.position_ids[..., self._seen_tokens] = new_pos
         self._current_position_ids.append(new_pos)
         self._whole_position_ids.append(new_pos)
@@ -603,7 +603,7 @@ class TokenUtils:
                     self._current_position_ids.append(self._whole_position_ids[-1] + 1)
                     self._whole_position_ids.append(self._whole_position_ids[-1] + 1)
         _end = _start + len(input_ids)
-        
+
         if self.rolling_rope:
             self.position_ids[..., 0:self._seen_tokens+len(input_ids)] = self.arange_ids[0:self._seen_tokens]
             self._current_position_ids.extend([self._current_position_ids[-1] + i + 1 for i in range(len(input_ids))])
@@ -614,7 +614,7 @@ class TokenUtils:
         self.max_token = max(self.max_token, self._seen_tokens)
         if return_tensors:
             return self.input_ids[..., _start:_end], self.position_ids[..., _start:_end]
- 
+
     def reduce_input_ids(self, start:int, end:int):
         origin_length = self._seen_tokens
         self._seen_tokens -= (end-start)
@@ -653,7 +653,7 @@ class TokenUtils:
 # ========== CORE CODE ==========
 @torch.no_grad()
 def _prefill_wo_prompt_compression(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     system_prompt:str,
@@ -671,11 +671,11 @@ def _prefill_wo_prompt_compression(
 
     past_key_values:DynamicCache = kv_utils.get_cache()
 
-    # 1. 
+    # 1.
     prompt:str = tokenizer.bos_token + comp_config.template_cfg['complete'].format(
         system=system_prompt, question=question
     )
-    # 2. 
+    # 2.
     input_ids = tokenizer.tokenizer(
         prompt, return_tensors=None
     )['input_ids']
@@ -686,7 +686,7 @@ def _prefill_wo_prompt_compression(
     # 3.
     model_output = model(
         input_ids=torch.as_tensor(
-            [input_ids], device="cuda"
+            [input_ids], device=token_utils.input_ids.device
         ),
         use_cache=True,
         past_key_values=past_key_values,
@@ -698,10 +698,10 @@ def _prefill_wo_prompt_compression(
     )
 
     return predicted_token_id
-    
+
 @torch.no_grad()
 def _prefill_w_prompt_compression(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     question:str,
@@ -761,7 +761,7 @@ def _prefill_w_prompt_compression(
             indicator_list.append(
                 [text_start, text_end, n_inst, comp_start, comp_end, n_cont]
             )
-        
+
         input_ids.extend(middle_input_ids)
         token_utils.show_prompt_input_ids.extend(middle_input_ids)
         for i in range(0, len(question_input_ids), step):
@@ -832,7 +832,7 @@ def _prefill_w_prompt_compression(
             indicator_list.append(
                 [text_start, text_end, n_inst, comp_start, comp_end, n_cont]
             )
-        
+
         input_ids.extend(middle_input_ids)
         token_utils.show_prompt_input_ids.extend(middle_input_ids)
         for sent in question_list:
@@ -869,7 +869,7 @@ def _prefill_w_prompt_compression(
     if DEBUG:
         DebugUtils.show_global_attention(
             tokenizer=tokenizer,
-            attention_mask=attention_mask.squeeze().cpu().tolist(), 
+            attention_mask=attention_mask.squeeze().cpu().tolist(),
             input_ids=input_ids,
             position_ids=token_utils.get_position_ids().squeeze().cpu().tolist(),
             block=BLOCK,
@@ -881,7 +881,7 @@ def _prefill_w_prompt_compression(
     # 3. inference
     model_output = model(
         input_ids=torch.as_tensor(
-            [input_ids], device="cuda"
+            [input_ids], device=token_utils.input_ids.device
         ),
         attention_mask=attention_mask,
         past_key_values=past_key_values,
@@ -906,12 +906,12 @@ def _prefill_w_prompt_compression(
                 file_name="debug_global.png",
             )
 
-    # 4. 
+    # 4.
     predicted_token_id:int = InferenceUtils.get_predicted_token_ids(
         model_output=model_output, idx=-1
     )
 
-    # 5. 
+    # 5.
     for indicator in indicator_list[::-1]:
         text_start, text_end, n_inst, comp_start, comp_end, n_cont = indicator
         start = text_start
@@ -924,7 +924,7 @@ def _prefill_w_prompt_compression(
 
 @torch.no_grad()
 def prefill(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     question:str,
@@ -974,7 +974,7 @@ def prefill(
 
 @torch.no_grad()
 def _token_level_generate(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     max_new_tokens: int,
@@ -1005,7 +1005,7 @@ def _token_level_generate(
         token_utils.show_output_input_ids.append(predicted_token_id)
         IS_COMP_MODE:bool = False
 
-        # 1. 
+        # 1.
         if explicit_token_cnt == output_comp_step:
             IS_COMP_MODE = True
             new_input_ids.extend(
@@ -1018,7 +1018,7 @@ def _token_level_generate(
                 origin_length = len(token_utils._whole_input_ids)
                 indicator = [
                     global_start,
-                    origin_length + 1, 
+                    origin_length + 1,
                     0,
                     origin_length + 1,
                     origin_length + len(comp_config.get_output_comp_token_id()) + 1,
@@ -1060,12 +1060,12 @@ def _token_level_generate(
                 )
 
         _local_mask_end = len(token_utils._current_input_ids) + 1
-        # 2. 
+        # 2.
         if token_utils.max_length < len(new_input_ids) + token_utils._seen_tokens:
             break
         input_ids, position_ids = token_utils.set_input_ids(
             new_input_ids, return_tensors=True
-        ) 
+        )
         if DEBUG:
             if update_attention_method == 'global':
                 DebugUtils.show_global_attention(
@@ -1081,7 +1081,7 @@ def _token_level_generate(
             else:
                 DebugUtils.show_local_attention(
                     tokenizer=tokenizer,
-                    attention_mask=attention_mask.squeeze(dim=0).squeeze(dim=0).cpu().tolist(), 
+                    attention_mask=attention_mask.squeeze(dim=0).squeeze(dim=0).cpu().tolist(),
                     input_ids=deepcopy(token_utils._current_input_ids),
                     position_ids=deepcopy(token_utils._current_position_ids),
                     block=BLOCK,
@@ -1090,7 +1090,7 @@ def _token_level_generate(
                     file_name="debug_local_8.png",
                 )
 
-        # 3. 
+        # 3.
         model_output = model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -1100,7 +1100,7 @@ def _token_level_generate(
             position_ids=position_ids,
         )
 
-        # 4. 
+        # 4.
         if IS_COMP_MODE:
             start = local_start
             end = _local_mask_end
@@ -1111,18 +1111,18 @@ def _token_level_generate(
             global_start:int = len(token_utils._whole_input_ids)
             local_start:int = len(token_utils._current_input_ids)
 
-        # 5. 
+        # 5.
         predicted_token_id:int = InferenceUtils.get_predicted_token_ids(
             model_output=model_output, idx=-1
         )
         new_token_counters += 1
-    
+
     token_utils.show_output_input_ids.append(predicted_token_id)
     return tokenizer.decode(token_utils.show_prompt_input_ids), tokenizer.decode(token_utils.show_output_input_ids)
 
 @torch.no_grad()
 def _sentence_level_generate(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     max_new_tokens: int,
@@ -1206,7 +1206,7 @@ def _sentence_level_generate(
             break
         input_ids, position_ids = token_utils.set_input_ids(
             new_input_ids, return_tensors=True
-        ) 
+        )
         if DEBUG:
             if update_attention_method == 'global':
                 print(attn_utils.last_idx)
@@ -1223,7 +1223,7 @@ def _sentence_level_generate(
             else:
                 DebugUtils.show_local_attention(
                     tokenizer=tokenizer,
-                    attention_mask=attention_mask.squeeze(dim=0).squeeze(dim=0).cpu().tolist(), 
+                    attention_mask=attention_mask.squeeze(dim=0).squeeze(dim=0).cpu().tolist(),
                     input_ids=deepcopy(token_utils._current_input_ids),
                     position_ids=deepcopy(token_utils._current_position_ids),
                     block=BLOCK,
@@ -1264,7 +1264,7 @@ def _sentence_level_generate(
 
 @torch.no_grad()
 def generate(
-    model: Union[LlamaForCausalLM, Qwen2ForCausalLM],
+    model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
     comp_config: Config,
     question:str,
@@ -1332,7 +1332,7 @@ def generate(
             predicted_token_id=predicted_token_id,
             update_attention_method=update_attention_method
         )
-    
+
     del kv_utils
     return prompt, output
 
@@ -1345,7 +1345,7 @@ def get_parser():
     parser.add_argument('--max_new_tokens', type=int)
     parser.add_argument('--output_tag', type=str)
     parser.add_argument('--model_type', type=str, choices=['qwen', 'llama'])
-    
+
     parser.add_argument('--bos_token', type=str)
     parser.add_argument('--eos_token', type=str)
 
@@ -1363,16 +1363,16 @@ def get_parser():
 
     parser.add_argument('--model_short_tag', type=str, default=None)
     parser.add_argument('--split_size', type=int)
-    parser.add_argument('--index', type=int)       
+    parser.add_argument('--index', type=int)
 
     args = parser.parse_args()
     return args
 
 def get_model_and_tokenizer(
-    args, 
+    args,
     comp_config:Config
 ) -> Tuple[
-    Union[Qwen2ForCausalLM, LlamaForCausalLM],
+    Union[Qwen3ForCausalLM, LlamaForCausalLM],
     Tokenizer
 ]:
     model_path = f"output/{args.model_tag}/checkpoint-{args.ckpt}"
@@ -1392,8 +1392,16 @@ def get_model_and_tokenizer(
         tokenizer.add_special_token(special_token_list)
 
     if args.model_type.lower() == 'qwen':
-        model = Qwen2ForCausalLM.from_pretrained(
-            model_path, torch_dtype=torch.bfloat16, device_map="auto"
+        tokenizer.validate_qwen3()
+        model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        if model_config.model_type != "qwen3":
+            raise ValueError(
+                f"Expected a Qwen3 checkpoint, but `{model_path}` has "
+                f"model_type={model_config.model_type!r}."
+            )
+        model = Qwen3ForCausalLM.from_pretrained(
+            model_path, config=model_config, torch_dtype=torch.bfloat16,
+            device_map="auto", attn_implementation="sdpa",
         )
     elif args.model_type.lower() == 'llama':
         model = LlamaForCausalLM.from_pretrained(
@@ -1405,7 +1413,7 @@ def get_model_and_tokenizer(
 
 @torch.no_grad()
 def eval_dataset(
-    model:Union[Qwen2ForCausalLM, LlamaForCausalLM],
+    model:Union[Qwen3ForCausalLM, LlamaForCausalLM],
     tokenizer:Tokenizer,
     reader:Reader,
     comp_config:Config,
@@ -1442,11 +1450,11 @@ def eval_dataset(
         end = len(reader)
     else:
         assert False
-    
+
     print(f"Starting test for `{dataset_name}`. Total size is {len(reader)}. Now, {index}/{split_size}: {start}-{end}")
-    
+
     pbar = tqdm(total=end-start)
-    
+
     output_dir = os.path.dirname(output_file)
     if not os.path.exists(output_dir):
         try:
@@ -1539,7 +1547,7 @@ def eval_dataset(
             end_time = time.time()
             input_len:int = len(token_utils.show_prompt_input_ids)
             output_len:int = len(token_utils.show_output_input_ids)
-            
+
             model_answer:str = reader.extract_answer(output)
             gt_answer:str = reader.get_answer(i)
             acc_state, comp_pattern = reader.compare_answer(model_answer, gt_answer, i)
@@ -1591,7 +1599,7 @@ def main():
     model, tokenizer = get_model_and_tokenizer(
         args, comp_config
     )
-    
+
     assert len(comp_config.get_output_comp_token_id()) == 1
     comp_config.split_token_id = comp_config.get_output_comp_token_id()[0]
     InferenceUtils.split_token_id = comp_config.split_token_id

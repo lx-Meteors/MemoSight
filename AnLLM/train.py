@@ -4,11 +4,11 @@ import argparse
 from typing import *
 from tqdm import tqdm
 from copy import deepcopy
-from transformers import Trainer, TrainingArguments
+from transformers import AutoConfig, Trainer, TrainingArguments
 
 from config import Config
 from tokenizer import Tokenizer
-from model_qwen import Qwen2ForCausalLM
+from model_qwen import Qwen3ForCausalLM
 from model_llama import LlamaForCausalLM
 from dataset import MyDataset, MyDataCollator
 from utils import _print, IGNORE_LABEL_ID, str2bool
@@ -35,7 +35,7 @@ def get_parser():
     parser.add_argument('--freeze_model', type=str2bool)
     parser.add_argument('--train_on_input', type=str2bool)
     parser.add_argument('--output_compress_instruction', type=str)
-    parser.add_argument('--hybrid', type=str2bool)  
+    parser.add_argument('--hybrid', type=str2bool)
     parser.add_argument('--prefill_compress', type=str2bool, default=True)
 
     parser.add_argument('--epochs', type=int)
@@ -70,22 +70,29 @@ def get_model_and_tokenizer(
             special_token_desp_dict[token] = desp
     if len(special_token_list) > 0:
         tokenizer.add_special_token(special_token_list)
-    
+
     if args.model_type == 'llama':
         model_class = LlamaForCausalLM
     elif args.model_type == 'qwen':
-        model_class = Qwen2ForCausalLM
+        model_class = Qwen3ForCausalLM
+        tokenizer.validate_qwen3()
     else:
         assert False, "We only support llama and qwen model."
 
+    model_config = AutoConfig.from_pretrained(args.model_path, trust_remote_code=True)
+    if args.model_type == 'qwen' and model_config.model_type != "qwen3":
+        raise ValueError(
+            f"Expected a Qwen3 checkpoint, but `{args.model_path}` has "
+            f"model_type={model_config.model_type!r}."
+        )
     model = model_class.from_pretrained(
-        args.model_path, torch_dtype=torch.bfloat16
+        args.model_path, config=model_config, torch_dtype=torch.bfloat16
     )
 
     model.add_qkv(
-        q='q' in args.qkv,
-        k='k' in args.qkv,
-        v='v' in args.qkv,
+        q='q' in args.qkv or bool(getattr(model.config, "lightthinker_new_q", False)),
+        k='k' in args.qkv or bool(getattr(model.config, "lightthinker_new_k", False)),
+        v='v' in args.qkv or bool(getattr(model.config, "lightthinker_new_v", False)),
     )
 
     if model.model.config.vocab_size != len(tokenizer):
@@ -96,12 +103,12 @@ def get_model_and_tokenizer(
         _print(f"now.embedding.shape={model.model.embed_tokens.weight.shape}")
         _print(f"now.lm_head.shape={model.lm_head.weight.shape}")
 
-    
-    
+
+
     if args.freeze_model:
         _print(f"Freezing Model:\nnew_token: {len(special_token_list)}\norigin_length: {len(tokenizer) - len(special_token_list)}")
         model.freeze_embed(
-            new_token_cnt=len(special_token_list), 
+            new_token_cnt=len(special_token_list),
             origin_length=len(tokenizer) - len(special_token_list)
         )
     else:
@@ -119,7 +126,7 @@ def get_model_and_tokenizer(
                 # lm_head layer
                 last_embedding = model.lm_head.weight[tokenized_ids].mean(axis=0)
                 model.lm_head.weight[-idx, :] = last_embedding.clone().detach().requires_grad_(True)
-    
+
     trainable_params = [name for name, param in model.named_parameters() if param.requires_grad]
     print("Trainable Parameters:")
     for param_name in trainable_params:
@@ -137,7 +144,7 @@ def get_dataset_and_data_collator(
     attention_config:Dict,
     sample_config:Dict,
 ) -> Tuple[MyDataset, MyDataCollator]:
-    
+
     dataset = MyDataset(
         file_path=args.train_path,
         config=comp_config,
@@ -187,7 +194,7 @@ def main():
     )
 
     dataset, data_collator = get_dataset_and_data_collator(
-        args=args, 
+        args=args,
         comp_config=comp_config,
         tokenizer=tokenizer,
         padding_config=padding_config,
