@@ -12,24 +12,25 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 RUN_TS="$(date +"%Y%m%d_%H%M%S")"
 
-# 一键测试官方 Qwen3-8B：预设参数放在用户参数之前，因此可在命令末尾覆盖。
-# 示例：bash scripts/pipeline.sh qwen3-8b-direct --target_gpus 0,1 --datasets gsm8k,gpqa
+# 一键测试 Qwen3-8B：默认评测四个数据集，使用 GPU 0-7、每卡一个进程。
+# 默认使用本地模型目录 /personal/models/Qwen3-8B；也可通过 QWEN3_MODEL_PATH 覆盖。
 if [[ "${1:-}" == "qwen3-8b-direct" ]]; then
     shift
+    direct_qwen3_model_path="${QWEN3_MODEL_PATH:-/personal/models/Qwen3-8B}"
     set -- \
         --stage infer \
         --exp_tag qwen3_8b_direct \
         --output_base_dir "${PROJECT_ROOT}/experiments" \
-        --model_path Qwen/Qwen3-8B \
-        --tokenizer_path Qwen/Qwen3-8B \
+        --model_path "${direct_qwen3_model_path}" \
+        --tokenizer_path "${direct_qwen3_model_path}" \
         --model_type qwen \
         --comp_config configs/LightThinker/qwen/v1.json \
         --use_epl false \
         --spec_decode false \
-        --target_gpus 0 \
+        --target_gpus 0,1,2,3,4,5,6,7 \
         --process_per_gpu 1 \
         --max_new_tokens 10240 \
-        --datasets gsm8k \
+        --datasets mmlu,gsm8k,gpqa,bbh \
         "$@"
 fi
 RAW_ARGS=("$@")
@@ -97,11 +98,14 @@ print_help() {
 用法:
   bash scripts/pipeline.sh --stage <train|infer|eval|all> [选项]
 
-一键测试官方 Qwen3-8B（默认 GPU 0、GSM8K、推理后自动评估）:
+一键测试 Qwen3-8B（默认 GPU 0-7、四个数据集、推理后自动评估）:
   bash scripts/pipeline.sh qwen3-8b-direct
 
-覆盖预设参数示例:
-  bash scripts/pipeline.sh qwen3-8b-direct --target_gpus 0,1 --datasets gsm8k,gpqa
+指定本地模型目录:
+  QWEN3_MODEL_PATH=/path/to/Qwen3-8B bash scripts/pipeline.sh qwen3-8b-direct
+
+也可以通过命令行同时覆盖模型和 tokenizer:
+  bash scripts/pipeline.sh qwen3-8b-direct --model_path /path/to/model --tokenizer_path /path/to/model
 
 核心选项:
   --stage                    执行阶段: train / infer / eval / all
@@ -609,13 +613,8 @@ log "执行完成: ${STAGE}"
 #   --datasets mmlu,gsm8k,gpqa,bbh
 
 
-# # 一键直接测试官方 Qwen3-8B（默认 GPU 0、GSM8K、推理后自动评估）
+# # 一键标准评测 Qwen3-8B（GPU 0-7；MMLU、GSM8K、GPQA、BBH）
 # bash scripts/pipeline.sh qwen3-8b-direct
 
-# # 覆盖默认 GPU、数据集、输出目录与生成长度
-# bash scripts/pipeline.sh qwen3-8b-direct \
-#   --target_gpus 0,1 \
-#   --datasets gsm8k,gpqa \
-#   --output_base_dir ./experiments \
-#   --exp_tag qwen3_8b_direct_gsm8k_gpqa \
-#   --max_new_tokens 8192
+# # 默认同时从 /personal/models/Qwen3-8B 加载模型和 tokenizer
+# bash scripts/pipeline.sh qwen3-8b-direct
