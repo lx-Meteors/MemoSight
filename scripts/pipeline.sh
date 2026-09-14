@@ -12,7 +12,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 RUN_TS="$(date +"%Y%m%d_%H%M%S")"
 
-# 一键测试 Qwen3-8B：默认评测四个数据集，使用 GPU 0-7、每卡一个进程。
+# 一键测试 Qwen3-8B：默认评测四个数据集，使用 GPU 0-7、每卡 8 个进程（共 64 个）。
 # 默认使用本地模型目录 /personal/models/Qwen3-8B；也可通过 QWEN3_MODEL_PATH 覆盖。
 if [[ "${1:-}" == "qwen3-8b-direct" ]]; then
     shift
@@ -28,7 +28,7 @@ if [[ "${1:-}" == "qwen3-8b-direct" ]]; then
         --use_epl false \
         --spec_decode false \
         --target_gpus 0,1,2,3,4,5,6,7 \
-        --process_per_gpu 1 \
+        --process_per_gpu 8 \
         --max_new_tokens 10240 \
         --datasets mmlu,gsm8k,gpqa,bbh \
         "$@"
@@ -98,7 +98,7 @@ print_help() {
 用法:
   bash scripts/pipeline.sh --stage <train|infer|eval|all> [选项]
 
-一键测试 Qwen3-8B（默认 GPU 0-7、四个数据集、推理后自动评估）:
+一键测试 Qwen3-8B（默认 GPU 0-7、共 64 个进程、四个数据集、推理后自动评估）:
   bash scripts/pipeline.sh qwen3-8b-direct
 
 指定本地模型目录:
@@ -613,7 +613,7 @@ log "执行完成: ${STAGE}"
 #   --datasets mmlu,gsm8k,gpqa,bbh
 
 
-# # 一键标准评测 Qwen3-8B（GPU 0-7；MMLU、GSM8K、GPQA、BBH）
+# # 一键标准评测 Qwen3-8B（GPU 0-7、每卡 8 个进程；MMLU、GSM8K、GPQA、BBH）
 # bash scripts/pipeline.sh qwen3-8b-direct
 
 # # 默认同时从 /personal/models/Qwen3-8B 加载模型和 tokenizer
