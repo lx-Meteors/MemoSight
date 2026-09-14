@@ -12,7 +12,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 RUN_TS="$(date +"%Y%m%d_%H%M%S")"
 
-# 一键测试 Qwen3-8B：默认评测四个数据集，使用 GPU 0-7、每卡 8 个进程（共 64 个）。
+# 一键测试 Qwen3-8B：默认评测四个数据集，使用 GPU 0-7、每卡 4 个进程（共 32 个）。
 # 默认使用本地模型目录 /personal/models/Qwen3-8B；也可通过 QWEN3_MODEL_PATH 覆盖。
 if [[ "${1:-}" == "qwen3-8b-direct" ]]; then
     shift
@@ -28,9 +28,40 @@ if [[ "${1:-}" == "qwen3-8b-direct" ]]; then
         --use_epl false \
         --spec_decode false \
         --target_gpus 0,1,2,3,4,5,6,7 \
-        --process_per_gpu 8 \
+        --process_per_gpu 4 \
         --max_new_tokens 10240 \
         --datasets mmlu,gsm8k,gpqa,bbh \
+        "$@"
+elif [[ "${1:-}" == "qwen3-8b-train-eval" ]]; then
+    shift
+    train_eval_model_path="${QWEN3_MODEL_PATH:-/personal/models/Qwen3-8B}"
+    train_eval_data_path="${QWEN3_TRAIN_DATA_PATH:-}"
+    set -- \
+        --stage all \
+        --exp_tag qwen3_8b_train_eval \
+        --output_base_dir "${PROJECT_ROOT}/experiments" \
+        --model_path "${train_eval_model_path}" \
+        --tokenizer_path "${train_eval_model_path}" \
+        --train_data_path "${train_eval_data_path}" \
+        --model_type qwen \
+        --conf_version v1 \
+        --comp_config configs/LightThinker/qwen/v1.json \
+        --use_epl false \
+        --mode normal \
+        --lr 1e-5 \
+        --max_length 4096 \
+        --epochs 5 \
+        --micro_batch_size 1 \
+        --gradient_accumulation_steps 4 \
+        --warmup_ratio 0.05 \
+        --lr_scheduler_type cosine \
+        --deepspeed_config configs/ds_z3_offload_config.json \
+        --train_gpus 0,1,2,3,4,5,6,7 \
+        --target_gpus 0,1,2,3,4,5,6,7 \
+        --process_per_gpu 1 \
+        --max_new_tokens 10240 \
+        --datasets mmlu,gsm8k,gpqa,bbh \
+        --spec_decode false \
         "$@"
 fi
 RAW_ARGS=("$@")
@@ -98,8 +129,14 @@ print_help() {
 用法:
   bash scripts/pipeline.sh --stage <train|infer|eval|all> [选项]
 
-一键测试 Qwen3-8B（默认 GPU 0-7、共 64 个进程、四个数据集、推理后自动评估）:
+一键测试 Qwen3-8B（默认 GPU 0-7、共 32 个进程、四个数据集、推理后自动评估）:
   bash scripts/pipeline.sh qwen3-8b-direct
+
+一键训练 Qwen3-8B，并使用最新 checkpoint 推理、评估四个数据集:
+  QWEN3_TRAIN_DATA_PATH=/path/to/train.jsonl bash scripts/pipeline.sh qwen3-8b-train-eval
+
+对应的独立启动脚本:
+  QWEN3_TRAIN_DATA_PATH=/path/to/train.jsonl bash scripts/qwen3_8b_train_eval.sh
 
 指定本地模型目录:
   QWEN3_MODEL_PATH=/path/to/Qwen3-8B bash scripts/pipeline.sh qwen3-8b-direct
@@ -219,6 +256,10 @@ run_train() {
     require_non_empty "--model_path" "${MODEL_PATH}"
     require_non_empty "--train_data_path" "${TRAIN_DATA_PATH}"
 
+    local train_data_path
+    train_data_path="$(to_abs_path "${TRAIN_DATA_PATH}")"
+    require_file "${train_data_path}"
+
     local train_py="${ROOT_DIR}/LightThinker/train.py"
     require_file "${train_py}"
 
@@ -238,7 +279,7 @@ run_train() {
         --model_type "${MODEL_TYPE}" \
         --model_path "${MODEL_PATH}" \
         --tokenizer_path "${TOKENIZER_PATH}" \
-        --train_path "${TRAIN_DATA_PATH}" \
+        --train_path "${train_data_path}" \
         --output_dir "${output_dir}" \
         --max_length "${MAX_LENGTH}" \
         --compress_config "${train_comp_config}" \
@@ -287,11 +328,14 @@ run_infer() {
         log "使用指定模型路径进行推理: ${infer_model_path}"
     else
         require_non_empty "--tokenizer_path" "${TOKENIZER_PATH}"
-        tokenizer_path_infer="${TOKENIZER_PATH}"
         local train_dir="${EXP_ROOT}/train"
         resolved_ckpt="$(resolve_ckpt "${train_dir}" "${CKPT}")"
         infer_model_path="${train_dir}/checkpoint-${resolved_ckpt}"
+        # 训练会向 tokenizer 加入压缩 token；推理必须使用 checkpoint 内同步保存的 tokenizer。
+        tokenizer_path_infer="${infer_model_path}"
+        log "使用训练 checkpoint 进行推理: ${infer_model_path}"
     fi
+    INFERENCE_TOKENIZER_PATH="${tokenizer_path_infer}"
 
     local output_tag="${EXP_ROOT}/inference"
     local model_short_tag="${EXP_TAG}"
@@ -366,7 +410,8 @@ run_infer() {
 }
 
 run_eval() {
-    require_non_empty "--tokenizer_path" "${TOKENIZER_PATH}"
+    local eval_tokenizer_path="${INFERENCE_TOKENIZER_PATH:-${TOKENIZER_PATH}}"
+    require_non_empty "--tokenizer_path" "${eval_tokenizer_path}"
     local eval_py="${ROOT_DIR}/evaluation/eval_file.py"
     local eval_init_py="${ROOT_DIR}/evaluation/init.py"
     require_file "${eval_py}"
@@ -409,7 +454,7 @@ run_eval() {
         local python_args=(
             "${eval_py}"
             --method "${EVAL_METHOD}"
-            --tokenizer_path "${TOKENIZER_PATH}"
+            --tokenizer_path "${eval_tokenizer_path}"
             --comp_config "${comp_cfg}"
             --model_type "${MODEL_TYPE}"
             --dataset "${ds}"
@@ -445,6 +490,7 @@ MODE=""
 TOKENIZER_PATH=""
 MODEL_PATH=""
 TRAIN_DATA_PATH=""
+INFERENCE_TOKENIZER_PATH=""
 CONF_VERSION="v1"
 TRAIN_GPUS="0,1,2,3,4,5,6,7"
 MAX_LENGTH=4096
@@ -613,8 +659,12 @@ log "执行完成: ${STAGE}"
 #   --datasets mmlu,gsm8k,gpqa,bbh
 
 
-# # 一键标准评测 Qwen3-8B（GPU 0-7、每卡 8 个进程；MMLU、GSM8K、GPQA、BBH）
+# # 一键标准评测 Qwen3-8B（GPU 0-7、每卡 4 个进程；MMLU、GSM8K、GPQA、BBH）
 # bash scripts/pipeline.sh qwen3-8b-direct
 
 # # 默认同时从 /personal/models/Qwen3-8B 加载模型和 tokenizer
 # bash scripts/pipeline.sh qwen3-8b-direct
+
+# # 训练 -> 最新 checkpoint 推理 -> MMLU/GSM8K/GPQA/BBH 评估
+# QWEN3_TRAIN_DATA_PATH=/path/to/train.jsonl \
+#   bash scripts/qwen3_8b_train_eval.sh

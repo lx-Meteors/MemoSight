@@ -129,21 +129,41 @@ bash scripts/pipeline.sh \
 
 ### 示例 3：全流程（train + infer + eval）
 
+推荐使用一键脚本。基础模型默认读取 `/personal/models/Qwen3-8B`，训练完成后会自动选择最新 checkpoint，在 8 张卡上推理并评估 MMLU、GSM8K、GPQA 和 BBH：
+
+```bash
+bash scripts/qwen3_8b_train_eval.sh /path/to/train.jsonl
+```
+
+如需覆盖基础模型目录：
+
+```bash
+QWEN3_MODEL_PATH=/path/to/Qwen3-8B \
+  bash scripts/qwen3_8b_train_eval.sh /path/to/train.jsonl
+```
+
+等价的完整参数调用如下：
+
 ```bash
 bash scripts/pipeline.sh \
   --stage all \
-  --exp_tag cot_qwen3_8b \
+  --exp_tag qwen3_8b_train_eval \
   --output_base_dir ./experiments \
   --use_epl false \
   --lr 1e-5 \
   --mode normal \
   --model_type qwen \
-  --tokenizer_path Qwen/Qwen3-8B \
-  --model_path Qwen/Qwen3-8B \
+  --tokenizer_path /personal/models/Qwen3-8B \
+  --model_path /personal/models/Qwen3-8B \
   --train_data_path /path/to/train.jsonl \
-  --train_gpus 0,1,2,3 \
-  --target_gpus 0,1,2,3 \
+  --train_gpus 0,1,2,3,4,5,6,7 \
+  --max_length 4096 \
+  --epochs 5 \
+  --micro_batch_size 1 \
+  --gradient_accumulation_steps 4 \
+  --target_gpus 0,1,2,3,4,5,6,7 \
   --process_per_gpu 1 \
+  --max_new_tokens 10240 \
   --datasets mmlu,gsm8k,gpqa,bbh
 ```
 
