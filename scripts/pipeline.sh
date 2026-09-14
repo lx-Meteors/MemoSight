@@ -11,6 +11,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 RUN_TS="$(date +"%Y%m%d_%H%M%S")"
+
+# 一键测试官方 Qwen3-8B：预设参数放在用户参数之前，因此可在命令末尾覆盖。
+# 示例：bash scripts/pipeline.sh qwen3-8b-direct --target_gpus 0,1 --datasets gsm8k,gpqa
+if [[ "${1:-}" == "qwen3-8b-direct" ]]; then
+    shift
+    set -- \
+        --stage infer \
+        --exp_tag qwen3_8b_direct \
+        --output_base_dir "${PROJECT_ROOT}/experiments" \
+        --model_path Qwen/Qwen3-8B \
+        --tokenizer_path Qwen/Qwen3-8B \
+        --model_type qwen \
+        --comp_config configs/LightThinker/qwen/v1.json \
+        --use_epl false \
+        --spec_decode false \
+        --target_gpus 0 \
+        --process_per_gpu 1 \
+        --max_new_tokens 10240 \
+        --datasets gsm8k \
+        "$@"
+fi
 RAW_ARGS=("$@")
 
 log() {
@@ -75,6 +96,12 @@ print_help() {
 
 用法:
   bash scripts/pipeline.sh --stage <train|infer|eval|all> [选项]
+
+一键测试官方 Qwen3-8B（默认 GPU 0、GSM8K、推理后自动评估）:
+  bash scripts/pipeline.sh qwen3-8b-direct
+
+覆盖预设参数示例:
+  bash scripts/pipeline.sh qwen3-8b-direct --target_gpus 0,1 --datasets gsm8k,gpqa
 
 核心选项:
   --stage                    执行阶段: train / infer / eval / all
@@ -582,16 +609,13 @@ log "执行完成: ${STAGE}"
 #   --datasets mmlu,gsm8k,gpqa,bbh
 
 
-# # 直接使用官方 Qwen3-8B 做 CoT 推理
-# bash scripts/pipeline.sh \
-#   --stage infer \
-#   --exp_tag cot_qwen3_8b_infer \
-#   --model_path Qwen/Qwen3-8B \
+# # 一键直接测试官方 Qwen3-8B（默认 GPU 0、GSM8K、推理后自动评估）
+# bash scripts/pipeline.sh qwen3-8b-direct
+
+# # 覆盖默认 GPU、数据集、输出目录与生成长度
+# bash scripts/pipeline.sh qwen3-8b-direct \
+#   --target_gpus 0,1 \
+#   --datasets gsm8k,gpqa \
 #   --output_base_dir ./experiments \
-#   --use_epl false \
-#   --spec_decode false \
-#   --model_type qwen \
-#   --tokenizer_path Qwen/Qwen3-8B \
-#   --target_gpus 0 \
-#   --process_per_gpu 1 \
-#   --datasets gsm8k
+#   --exp_tag qwen3_8b_direct_gsm8k_gpqa \
+#   --max_new_tokens 8192
