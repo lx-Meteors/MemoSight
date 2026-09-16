@@ -23,6 +23,7 @@ Qwen3-8B 一键训练、推理和评测
   输出目录    <项目目录>/experiments/qwen3_8b_train_eval
   训练轮数    5
   学习率      1e-5
+  全局 batch  64（8 卡 × 每卡 2 × 梯度累积 4）
 
 示例:
   bash scripts/qwen3_8b_train_eval.sh ./data/train/train.jsonl

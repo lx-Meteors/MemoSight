@@ -51,7 +51,7 @@ elif [[ "${1:-}" == "qwen3-8b-train-eval" ]]; then
         --lr 1e-5 \
         --max_length 4096 \
         --epochs 5 \
-        --micro_batch_size 1 \
+        --micro_batch_size 2 \
         --gradient_accumulation_steps 4 \
         --warmup_ratio 0.05 \
         --lr_scheduler_type cosine \

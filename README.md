@@ -159,7 +159,7 @@ bash scripts/pipeline.sh \
   --train_gpus 0,1,2,3,4,5,6,7 \
   --max_length 4096 \
   --epochs 5 \
-  --micro_batch_size 1 \
+  --micro_batch_size 2 \
   --gradient_accumulation_steps 4 \
   --target_gpus 0,1,2,3,4,5,6,7 \
   --process_per_gpu 1 \
