@@ -58,7 +58,7 @@ elif [[ "${1:-}" == "qwen3-8b-train-eval" ]]; then
         --deepspeed_config configs/ds_z3_offload_config.json \
         --train_gpus 0,1,2,3,4,5,6,7 \
         --target_gpus 0,1,2,3,4,5,6,7 \
-        --process_per_gpu 1 \
+        --process_per_gpu 4 \
         --max_new_tokens 10240 \
         --datasets mmlu,gsm8k,gpqa,bbh \
         --spec_decode false \

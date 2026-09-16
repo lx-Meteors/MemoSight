@@ -15,7 +15,7 @@ Qwen3-8B 一键训练、推理和评测
 
 默认流程:
   1. 使用 GPU 0-7 训练 Qwen3-8B
-  2. 自动选择最新 checkpoint，在 GPU 0-7 上并行推理
+  2. 自动选择最新 checkpoint，在 GPU 0-7 上以每卡 4 个进程并行推理（共 32 个）
   3. 评测 mmlu、gsm8k、gpqa、bbh
 
 默认值:

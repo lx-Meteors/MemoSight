@@ -162,7 +162,7 @@ bash scripts/pipeline.sh \
   --micro_batch_size 2 \
   --gradient_accumulation_steps 4 \
   --target_gpus 0,1,2,3,4,5,6,7 \
-  --process_per_gpu 1 \
+  --process_per_gpu 4 \
   --max_new_tokens 10240 \
   --datasets mmlu,gsm8k,gpqa,bbh
 ```
