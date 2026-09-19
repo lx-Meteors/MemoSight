@@ -97,3 +97,14 @@ echo "[INFO] 基础模型: ${QWEN3_MODEL_PATH:-/personal/models/Qwen3-8B}"
 echo "[INFO] 启动训练 -> 推理 -> 评测"
 
 exec bash "${PIPELINE_SCRIPT}" qwen3-8b-train-eval "$@"
+
+
+# nohup bash scripts/pipeline.sh \
+#   --stage infer \
+#   --exp_tag qwen3_8b_train_eval \
+#   --output_base_dir ./experiments \
+#   --tokenizer_path /personal/models/Qwen3-8B \
+#   --target_gpus 0,1,2,3,4,5,6,7 \
+#   --process_per_gpu 4 \
+#   --datasets mmlu,gsm8k,gpqa,bbh \
+#   > qwen3_8b_infer_eval.log 2>&1 &
