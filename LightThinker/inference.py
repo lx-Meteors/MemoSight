@@ -1,9 +1,9 @@
 
 import os
 import time
+import json
 import torch
 import argparse
-import jsonlines
 import numpy as np
 from typing import *
 from tqdm import tqdm
@@ -2612,6 +2612,88 @@ def get_model_and_tokenizer(
 
     return model, tokenizer
 
+def _load_jsonl_resume_state(
+    output_file: str,
+    shard_start: int,
+    shard_end: int,
+) -> Tuple[int, int, Optional[int]]:
+    """Read durable progress and trim only a partially written final line."""
+    if not os.path.isfile(output_file):
+        return 0, 0, None
+
+    completed = 0
+    correct = 0
+    last_idx: Optional[int] = None
+    file_size = os.path.getsize(output_file)
+    truncate_at: Optional[int] = None
+
+    with open(output_file, "rb") as reader:
+        while True:
+            line_start = reader.tell()
+            raw_line = reader.readline()
+            if raw_line == b"":
+                break
+            line_end = reader.tell()
+
+            if not raw_line.strip():
+                if line_end != file_size:
+                    raise ValueError(
+                        f"Blank JSONL line found before EOF in {output_file} at byte {line_start}."
+                    )
+                truncate_at = line_start
+                break
+
+            try:
+                item = json.loads(raw_line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                if line_end != file_size:
+                    raise ValueError(
+                        f"Invalid JSONL before EOF in {output_file} at byte {line_start}."
+                    ) from exc
+                truncate_at = line_start
+                print(
+                    f"[RESUME] Removing an incomplete final JSONL line from {output_file} "
+                    f"at byte {line_start}."
+                )
+                break
+
+            expected_idx = shard_start + completed
+            item_idx = item.get("idx")
+            if item_idx != expected_idx:
+                raise ValueError(
+                    f"Non-contiguous idx in {output_file}: expected {expected_idx}, got {item_idx}."
+                )
+            if item_idx >= shard_end:
+                raise ValueError(
+                    f"idx {item_idx} in {output_file} is outside shard range "
+                    f"[{shard_start}, {shard_end})."
+                )
+
+            completed += 1
+            correct += int(item.get("acc_state") is True)
+            last_idx = item_idx
+
+    if truncate_at is not None:
+        with open(output_file, "r+b") as output_stream:
+            output_stream.truncate(truncate_at)
+            output_stream.flush()
+            os.fsync(output_stream.fileno())
+
+    # A valid final JSON object written without its newline must be separated
+    # from the next appended record.
+    if os.path.getsize(output_file) > 0:
+        with open(output_file, "rb") as reader:
+            reader.seek(-1, os.SEEK_END)
+            has_trailing_newline = reader.read(1) == b"\n"
+        if not has_trailing_newline:
+            with open(output_file, "ab") as output_stream:
+                output_stream.write(b"\n")
+                output_stream.flush()
+                os.fsync(output_stream.fileno())
+
+    return completed, correct, last_idx
+
+
 @torch.no_grad()
 def eval_dataset(
     model:Union[Qwen3ForCausalLM, LlamaForCausalLM],
@@ -2656,32 +2738,28 @@ def eval_dataset(
     else:
         assert False
 
+    shard_start = start
     print(f"Starting test for `{dataset_name}`. Total size is {len(reader)}. Now, {index}/{split_size}: {start}-{end}")
 
-    pbar = tqdm(total=end-start)
-
     output_dir = os.path.dirname(output_file)
-    if not os.path.exists(output_dir):
-        try:
-            os.makedirs(output_dir)
-        except:
-            pass
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
 
     # ===== CONTINUE =====
-    data_copy_list = list()
-    _id_list = list()
-    if os.path.isfile(output_file):
-        with jsonlines.open(output_file, 'r') as f:
-            for item in f:
-                _id_list.append(item['idx'])
-                data_copy_list.append(item)
-        if len(_id_list) != 0:
-            assert _id_list[0] == start
-            start = _id_list[-1] + 1
+    total, acc, last_idx = _load_jsonl_resume_state(
+        output_file=output_file,
+        shard_start=shard_start,
+        shard_end=end,
+    )
+    if last_idx is not None:
+        start = last_idx + 1
+    print(
+        f"[RESUME] dataset={dataset_name} shard={index}/{split_size} "
+        f"saved={total} next_idx={start} end={end} file={output_file}"
+    )
     # ====================
 
-    total = 0
-    acc = 0
+    pbar = tqdm(total=end-shard_start, initial=total)
 
     attn_utils = AttentionUtils(
         max_length=max_new_tokens + max_prompt_len,
@@ -2699,27 +2777,9 @@ def eval_dataset(
         rolling_rope=rolling_rope
     )
 
-    with jsonlines.open(output_file, 'w') as writer:
-        # ===== CONTINUE =====
-        for item in data_copy_list:
-            writer.write(item)
-            total += 1
-            if item['acc_state'] == True:
-                acc += 1
-            model_answer = item['model_answer']
-            gt_answer = item['gt_answer']
-            acc_state = item['acc_state']
-            input_len = item['input_len']
-            output_len = item['output_len']
-            max_token = item['max_token']
-            comp_pattern = item['comp_pattern']
-
-            pbar.set_description(f"model:`{model_answer}`; gt:`{gt_answer}`; correct:{acc_state}; acc: {acc}/{total}={round(acc/total, 5)}; input: {input_len}; output: {output_len}; `{comp_pattern}`; max_token: {max_token}")
-            pbar.update(1)
-        # ====================
-
+    fsync_supported = True
+    with open(output_file, 'a', encoding='utf-8') as output_stream:
         for i in range(start, end):
-            total += 1
             question:str = reader.get_prompt(idx=i)
             question_list:List[str] = reader.get_prompt_list(idx=i)
             system_prompt:str = reader.get_system_prompt()
@@ -2756,10 +2816,11 @@ def eval_dataset(
             model_answer:str = reader.extract_answer(output)
             gt_answer:str = reader.get_answer(i)
             acc_state, comp_pattern = reader.compare_answer(model_answer, gt_answer, i)
+            total += 1
             if acc_state == True:
                 acc += 1
 
-            writer.write(dict(
+            record = dict(
                 idx=i,
                 model_answer=model_answer,
                 gt_answer=gt_answer,
@@ -2771,7 +2832,18 @@ def eval_dataset(
                 infer_time=end_time-start_time,
                 comp_pattern=comp_pattern,
                 max_token=token_utils.max_token
-            ))
+            )
+            output_stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+            output_stream.flush()
+            if fsync_supported:
+                try:
+                    os.fsync(output_stream.fileno())
+                except OSError as exc:
+                    fsync_supported = False
+                    print(
+                        f"[WARNING] fsync is not supported for {output_file}: {exc}. "
+                        "Continuing with flush-after-each-record."
+                    )
             pbar.set_description(f"model:`{model_answer}`; gt:`{gt_answer}`; correct:{acc_state}; acc: {acc}/{total}={round(acc/total, 5)}; input: {input_len}; output: {output_len}; `{comp_pattern}`; max_token: {token_utils.max_token}")
             token_utils.reset()
             attn_utils.reset()
