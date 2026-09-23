@@ -22,6 +22,7 @@ TRAIN_GPUS="${TRAIN_GPUS:-0,1,2,3,4,5,6,7}"
 MAX_LENGTH="${MAX_LENGTH:-4096}"
 EPOCHS="${EPOCHS:-5}"
 LEARNING_RATE="${LEARNING_RATE:-2e-5}"
+SAVE_STEPS="${SAVE_STEPS:-100}"
 MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
 GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-8}"
 WARMUP_RATIO="${WARMUP_RATIO:-0.05}"
@@ -101,6 +102,7 @@ echo "GPU: ${TRAIN_GPUS}"
 echo "max_length: ${MAX_LENGTH}"
 echo "epochs: ${EPOCHS}"
 echo "learning_rate: ${LEARNING_RATE}"
+echo "checkpoint: 每 ${SAVE_STEPS} steps 保存，只保留最新 1 个"
 echo "日志: ${LOG_FILE}"
 if [[ -n "${LATEST_CHECKPOINT}" ]]; then
     echo "恢复训练: ${LATEST_CHECKPOINT}"
@@ -126,6 +128,8 @@ nohup env \
         --lr "${LEARNING_RATE}" \
         --max_length "${MAX_LENGTH}" \
         --epochs "${EPOCHS}" \
+        --save_strategy steps \
+        --save_steps "${SAVE_STEPS}" \
         --micro_batch_size "${MICRO_BATCH_SIZE}" \
         --gradient_accumulation_steps "${GRADIENT_ACCUMULATION_STEPS}" \
         --warmup_ratio "${WARMUP_RATIO}" \

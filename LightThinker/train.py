@@ -234,6 +234,7 @@ def get_parser():
 
     parser.add_argument('--epochs', type=int)
     parser.add_argument('--lr', type=float)
+    parser.add_argument('--save_strategy', type=str, choices=['steps', 'epoch'], default='epoch')
     parser.add_argument('--save_steps', type=int)
     parser.add_argument('--deepspeed', type=str, help="file path")
     parser.add_argument('--micro_batch_size', type=int)
@@ -433,8 +434,8 @@ def main():
         logging_steps=1,
         do_eval=False,
         optim="adamw_torch",
-        save_strategy="epoch",      # the default value is step
-        save_steps=args.save_steps, # if the strategy is epoch, the save_steps is not used.
+        save_strategy=args.save_strategy,
+        save_steps=args.save_steps,
         output_dir=args.output_dir,
         save_only_model=False,       # don't save the global_steps
         load_best_model_at_end=False,

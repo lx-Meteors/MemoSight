@@ -93,6 +93,7 @@ print_help() {
   --train_gpus               训练卡号，逗号分隔（默认 0,1,2,3,4,5,6,7）
   --max_length               默认 4096
   --epochs                   默认 5
+  --save_strategy            checkpoint 保存策略: epoch / steps（默认 epoch）
   --save_steps               默认 2
   --micro_batch_size         默认 2
   --gradient_accumulation_steps  默认 4
@@ -173,6 +174,8 @@ save_param_snapshot() {
         echo "infer_model_path=${INFER_MODEL_PATH}"
         echo "legacy_model_path=${MODEL_PATH}"
         echo "train_data_path=${TRAIN_DATA_PATH}"
+        echo "save_strategy=${SAVE_STRATEGY}"
+        echo "save_steps=${SAVE_STEPS}"
         echo "model_type=${MODEL_TYPE}"
         echo "datasets=${DATASETS}"
         echo "ckpt=${CKPT}"
@@ -229,6 +232,7 @@ run_train() {
         --output_compress_instruction "${OUTPUT_COMPRESS_INSTRUCTION}" \
         --epochs "${EPOCHS}" \
         --lr "${LR}" \
+        --save_strategy "${SAVE_STRATEGY}" \
         --save_steps "${SAVE_STEPS}" \
         --deepspeed "${ds_cfg}" \
         --micro_batch_size "${MICRO_BATCH_SIZE}" \
@@ -425,6 +429,7 @@ CONF_VERSION="v1"
 TRAIN_GPUS="0,1,2,3,4,5,6,7"
 MAX_LENGTH=4096
 EPOCHS=5
+SAVE_STRATEGY="epoch"
 SAVE_STEPS=2
 MICRO_BATCH_SIZE=2
 GRADIENT_ACCUMULATION_STEPS=4
@@ -486,6 +491,7 @@ while [[ $# -gt 0 ]]; do
         --train_gpus) TRAIN_GPUS="${2:-}"; shift 2 ;;
         --max_length) MAX_LENGTH="${2:-}"; shift 2 ;;
         --epochs) EPOCHS="${2:-}"; shift 2 ;;
+        --save_strategy) SAVE_STRATEGY="${2:-}"; shift 2 ;;
         --save_steps) SAVE_STEPS="${2:-}"; shift 2 ;;
         --micro_batch_size) MICRO_BATCH_SIZE="${2:-}"; shift 2 ;;
         --gradient_accumulation_steps) GRADIENT_ACCUMULATION_STEPS="${2:-}"; shift 2 ;;
