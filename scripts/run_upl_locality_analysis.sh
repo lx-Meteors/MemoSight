@@ -160,7 +160,16 @@ for index in "${!SAMPLE_ARRAY[@]}"; do
         PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/LightThinker${PYTHONPATH:+:${PYTHONPATH}}" \
         CUDA_VISIBLE_DEVICES="${gpu_id}" \
         TOKENIZERS_PARALLELISM=false \
-        flock -n -F "${lock_file}" \
+        bash -c '
+            lock_file="$1"
+            shift
+            exec 9>"${lock_file}"
+            if ! flock -n 9; then
+                echo "错误：sample 目录已有分析任务运行：${lock_file}" >&2
+                exit 73
+            fi
+            exec "$@"
+        ' bash "${lock_file}" \
         "${PYTHON_BIN}" "${ANALYSIS_SCRIPT}" \
             --model_path "${MEMOSIGHT_MODEL_PATH}" \
             --baseline_model_path "${LIGHTTHINKER_MODEL_PATH}" \

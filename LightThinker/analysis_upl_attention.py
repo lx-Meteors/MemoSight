@@ -543,39 +543,47 @@ def plot_pair(
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import MaxNLocator
 
-    height = max(3.2, max(upl_block.shape[0], baseline_block.shape[0]) * 0.22 + 2)
-    fig, axes = plt.subplots(1, 2, figsize=(13, height))
+    # Compact two-column-paper layout.  Keep the explanatory details in the
+    # manuscript caption instead of repeating them inside the figure.
+    fig, axes = plt.subplots(1, 2, figsize=(7.1, 3.0))
     vmax = max(float(np.max(upl_block)), float(np.max(baseline_block)), 1e-12)
     conditions = [
-        (axes[0], upl_block, "MemoSight + UPL", upl_score),
-        (axes[1], baseline_block, "LightThinker + contiguous", baseline_score),
+        (axes[0], upl_block, "MemoSight (UPL)"),
+        (axes[1], baseline_block, "LightThinker"),
     ]
-    for axis, block, title, score in conditions:
+    image = None
+    for axis, block, title in conditions:
         image = axis.imshow(block, aspect="auto", cmap="viridis", vmin=0, vmax=vmax)
         n_comp, segment_length = block.shape
         centers = [
             int((index + 0.5) * segment_length / n_comp)
             for index in range(n_comp)
         ]
-        axis.plot(centers, range(n_comp), "r.", markersize=5, label="uniform center")
-        axis.set_title(f"{title}\nnorm-offset={score:.3f}")
-        axis.set_xlabel(f"original segment token (0..{segment_length - 1})")
-        axis.set_ylabel("memory token")
-        if n_comp > 20:
-            ticks = np.linspace(0, n_comp - 1, 10, dtype=int)
-            axis.set_yticks(ticks)
-        axis.legend(loc="upper right", fontsize=7)
-        fig.colorbar(image, ax=axis, fraction=0.046, pad=0.04)
-    fig.suptitle(
-        "Memory-token → compressed-segment attention\n"
-        f"segment #{item['index']} | raw lengths "
-        f"{item['upl_len']} / {item['baseline_len']}"
+        axis.plot(centers, range(n_comp), "r.", markersize=3.5)
+        axis.set_title(title, fontsize=9, pad=4)
+        axis.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=True))
+        axis.yaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
+        axis.tick_params(axis="both", labelsize=7, length=2.5)
+
+    fig.supxlabel("Original token position", fontsize=8.5, y=0.035)
+    fig.supylabel("Memory token index", fontsize=8.5, x=0.025)
+    colorbar = fig.colorbar(
+        image,
+        ax=axes.ravel().tolist(),
+        fraction=0.032,
+        pad=0.025,
     )
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=180, bbox_inches="tight")
+    colorbar.set_label("Attention", fontsize=8)
+    colorbar.ax.tick_params(labelsize=7, length=2.5)
+    fig.subplots_adjust(left=0.11, right=0.91, bottom=0.19, top=0.88, wspace=0.22)
+    fig.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0.02)
+    pdf_path = str(Path(out_path).with_suffix(".pdf"))
+    fig.savefig(pdf_path, bbox_inches="tight", pad_inches=0.02)
     plt.close(fig)
     print(f"[saved] {out_path}")
+    print(f"[saved] {pdf_path}")
 
 
 def plot_per_head(per_head_block: np.ndarray, title: str, out_path: str, row_normalize: bool):

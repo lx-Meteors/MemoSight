@@ -49,7 +49,7 @@ MAX_LENGTH=3072 LAYERS=12,16,20 \
 
 每个样本写入 `analysis_results/upl_locality/sampleN/`：
 
-- `sampleN_seg*_len*.png`：MemoSight 与 LightThinker 的配对平均-head 热图。
+- `sampleN_seg*_len*.png/.pdf`：MemoSight 与 LightThinker 的论文版配对平均-head 热图。
 - `sampleN_seg*_perhead_MemoSight_UPL.png`：MemoSight 各 attention head。
 - `sampleN_seg*_perhead_LightThinker.png`：LightThinker 各 attention head。
 - `sampleN_continuation_nll_by_seglen.png`：按原始压缩段长度分桶的 NLL 差值。
