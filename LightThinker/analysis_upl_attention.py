@@ -534,9 +534,6 @@ def band_localization_score(block: np.ndarray) -> float:
 def plot_pair(
     upl_block: np.ndarray,
     baseline_block: np.ndarray,
-    item: Dict,
-    upl_score: float,
-    baseline_score: float,
     out_path: str,
 ):
     import matplotlib
@@ -556,12 +553,6 @@ def plot_pair(
     image = None
     for axis, block, title in conditions:
         image = axis.imshow(block, aspect="auto", cmap="viridis", vmin=0, vmax=vmax)
-        n_comp, segment_length = block.shape
-        centers = [
-            int((index + 0.5) * segment_length / n_comp)
-            for index in range(n_comp)
-        ]
-        axis.plot(centers, range(n_comp), "r.", markersize=3.5)
         axis.set_title(title, fontsize=9, pad=4)
         axis.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=True))
         axis.yaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
@@ -837,9 +828,6 @@ def main() -> int:
         plot_pair(
             upl_block,
             baseline_block,
-            item,
-            upl_score,
-            baseline_score,
             figure_path,
         )
         segment_summaries.append(
