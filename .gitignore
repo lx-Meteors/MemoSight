@@ -31,6 +31,12 @@ sglang_inference_results/
 # Data
 data/train
 data/*
+!data/eval/
+data/eval/*
+!data/eval/aime_2026.json
+!data/eval/aime_2026.jsonl
+!data/eval/hmmt_feb_2025.json
+!data/eval/hmmt_feb_2025.jsonl
 data/train/dataset_cache/
 output/
 EOF

@@ -110,8 +110,18 @@ print_help() {
   --repetition_penalty       默认 1.1
   --target_gpus              推理卡号，逗号分隔（默认 0,1,2,3,4,5,6,7）
   --process_per_gpu          每卡进程数（默认 4）
-  --max_new_tokens           默认 10240
+  --max_new_tokens           默认 24576（24K）
   --spec_decode             是否启用投机解码 true/false（默认 false）
+  --vanilla_inference       保持基础 tokenizer/词表，不注册压缩 token（默认 false）
+  --rkv                     在 Vanilla 推理上启用免训练 R-KV（默认 false）
+  --rkv_budget              R-KV 保留的 KV token 数（默认 1536）
+  --rkv_buffer_size         每次压缩前暂存的生成 token 数（默认 128）
+  --rkv_window_size         query 观察窗口（默认 8）
+  --rkv_kernel_size         重要性池化核大小（默认 7）
+  --rkv_mix_lambda          重要性/冗余混合权重（默认 0.1）
+  --rkv_retain_ratio        相似邻居保留比例（默认 0.2）
+  --rkv_retain_direction    相似邻居保留方向（默认 last）
+  --rkv_similarity_threshold 余弦相似度阈值（默认 0.5）
 
 兼容参数:
   --model_path               兼容旧参数：按 stage 映射到 train/infer；stage=all 时仅用于训练
@@ -183,6 +193,16 @@ save_param_snapshot() {
         echo "process_per_gpu=${PROCESS_PER_GPU}"
         echo "max_new_tokens=${MAX_NEW_TOKENS}"
         echo "spec_decode=${SPEC_DECODE}"
+        echo "vanilla_inference=${VANILLA_INFERENCE}"
+        echo "rkv=${RKV}"
+        echo "rkv_budget=${RKV_BUDGET}"
+        echo "rkv_buffer_size=${RKV_BUFFER_SIZE}"
+        echo "rkv_window_size=${RKV_WINDOW_SIZE}"
+        echo "rkv_kernel_size=${RKV_KERNEL_SIZE}"
+        echo "rkv_mix_lambda=${RKV_MIX_LAMBDA}"
+        echo "rkv_retain_ratio=${RKV_RETAIN_RATIO}"
+        echo "rkv_retain_direction=${RKV_RETAIN_DIRECTION}"
+        echo "rkv_similarity_threshold=${RKV_SIMILARITY_THRESHOLD}"
         echo "seed=${SEED}"
     } > "${snapshot}"
     link_latest "${snapshot}" "run_latest.txt"
@@ -325,6 +345,16 @@ run_infer() {
                 --model_path "${infer_model_path}" \
                 --index "${real_index}" \
                 --spec_decode "${SPEC_DECODE}" \
+                --vanilla "${VANILLA_INFERENCE}" \
+                --rkv "${RKV}" \
+                --rkv_budget "${RKV_BUDGET}" \
+                --rkv_buffer_size "${RKV_BUFFER_SIZE}" \
+                --rkv_window_size "${RKV_WINDOW_SIZE}" \
+                --rkv_kernel_size "${RKV_KERNEL_SIZE}" \
+                --rkv_mix_lambda "${RKV_MIX_LAMBDA}" \
+                --rkv_retain_ratio "${RKV_RETAIN_RATIO}" \
+                --rkv_retain_direction "${RKV_RETAIN_DIRECTION}" \
+                --rkv_similarity_threshold "${RKV_SIMILARITY_THRESHOLD}" \
                 --datasets "${ds_arr[@]}" \
                 > "${output_tag}/inference_log/false_false/${real_index}_${model_short_tag}_${resolved_ckpt}.txt" 2>&1 &
             pids+=("$!")
@@ -453,6 +483,16 @@ PREFILL_COMPRESS="false"
 CKPT=""
 REPETITION_PENALTY="1.1"
 SPEC_DECODE="false"
+VANILLA_INFERENCE="false"
+RKV="false"
+RKV_BUDGET=1536
+RKV_BUFFER_SIZE=128
+RKV_WINDOW_SIZE=8
+RKV_KERNEL_SIZE=7
+RKV_MIX_LAMBDA="0.1"
+RKV_RETAIN_RATIO="0.2"
+RKV_RETAIN_DIRECTION="last"
+RKV_SIMILARITY_THRESHOLD="0.5"
 
 # 评估参数
 EVAL_METHOD="normal"
@@ -467,7 +507,7 @@ INTERACTION="false"
 # 推理并发参数
 TARGET_GPUS="0,1,2,3,4,5,6,7"
 PROCESS_PER_GPU=4
-MAX_NEW_TOKENS=10240
+MAX_NEW_TOKENS=24576
 
 # ---------- 参数解析 ----------
 while [[ $# -gt 0 ]]; do
@@ -518,6 +558,16 @@ while [[ $# -gt 0 ]]; do
         --process_per_gpu) PROCESS_PER_GPU="${2:-}"; shift 2 ;;
         --max_new_tokens) MAX_NEW_TOKENS="${2:-}"; shift 2 ;;
         --spec_decode) SPEC_DECODE="${2:-}"; shift 2 ;;
+        --vanilla_inference) VANILLA_INFERENCE="${2:-}"; shift 2 ;;
+        --rkv) RKV="${2:-}"; shift 2 ;;
+        --rkv_budget) RKV_BUDGET="${2:-}"; shift 2 ;;
+        --rkv_buffer_size) RKV_BUFFER_SIZE="${2:-}"; shift 2 ;;
+        --rkv_window_size) RKV_WINDOW_SIZE="${2:-}"; shift 2 ;;
+        --rkv_kernel_size) RKV_KERNEL_SIZE="${2:-}"; shift 2 ;;
+        --rkv_mix_lambda) RKV_MIX_LAMBDA="${2:-}"; shift 2 ;;
+        --rkv_retain_ratio) RKV_RETAIN_RATIO="${2:-}"; shift 2 ;;
+        --rkv_retain_direction) RKV_RETAIN_DIRECTION="${2:-}"; shift 2 ;;
+        --rkv_similarity_threshold) RKV_SIMILARITY_THRESHOLD="${2:-}"; shift 2 ;;
 
         # 评估参数
         --eval_method) EVAL_METHOD="${2:-}"; shift 2 ;;
@@ -608,6 +658,6 @@ log "执行完成: ${STAGE}"
 #   --train_gpus 0,1,2,3,4,5,6,7 \
 #   --target_gpus 0,1,2,3,4,5,6,7 \
 #   --process_per_gpu 1 \
-#   --max_new_tokens 10240 \
+#   --max_new_tokens 24576 \
 #   --spec_decode false \
 #   --datasets mmlu,gsm8k,gpqa,bbh

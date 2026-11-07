@@ -403,6 +403,13 @@ class Qwen3Attention(nn.Module):
             cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
+        # R-KV uses the last alpha RoPE-applied queries to score cached keys.
+        # Keep this opt-in so the normal LightThinker/MemoSight paths do not
+        # retain any additional activation tensors.
+        if getattr(self, "rkv_capture_queries", False):
+            rkv_window = int(getattr(self, "rkv_query_window_size", query_states.shape[-2]))
+            self.rkv_last_query_states = query_states[:, :, -rkv_window:, :].detach()
+
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
@@ -495,6 +502,10 @@ class Qwen3FlashAttention2(Qwen3Attention):
         else:
             cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        if getattr(self, "rkv_capture_queries", False):
+            rkv_window = int(getattr(self, "rkv_query_window_size", query_states.shape[-2]))
+            self.rkv_last_query_states = query_states[:, :, -rkv_window:, :].detach()
 
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
@@ -630,6 +641,10 @@ class Qwen3SdpaAttention(Qwen3Attention):
         else:
             cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        if getattr(self, "rkv_capture_queries", False):
+            rkv_window = int(getattr(self, "rkv_query_window_size", query_states.shape[-2]))
+            self.rkv_last_query_states = query_states[:, :, -rkv_window:, :].detach()
 
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models

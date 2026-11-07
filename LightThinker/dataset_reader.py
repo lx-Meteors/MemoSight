@@ -3,6 +3,7 @@ import jsonlines
 from typing import *
 import time
 import regex as re
+from fractions import Fraction
 
 DATASET_PATH = dict(
     mmlu="data/eval/mmlu.json",
@@ -10,6 +11,8 @@ DATASET_PATH = dict(
     gpqa="data/eval/gpqa.json",
     gsm8k="data/eval/gsm8k.json",
     distill="data/eval/distill.json",
+    aime_2026="data/eval/aime_2026.json",
+    hmmt_feb_2025="data/eval/hmmt_feb_2025.json",
 )
 
 # DATASET_PATH = dict(
@@ -24,7 +27,7 @@ def _print(messages):
 
 def read_json(file_path:str) -> Dict:
     _print(f"reading json file from `{file_path}` ...")
-    with open(file_path, 'r') as reader:
+    with open(file_path, 'r', encoding='utf-8') as reader:
         data:dict = json.load(reader)
     return data
 
@@ -299,6 +302,77 @@ class GSM8KReader(Reader):
             "<|begin_of_solution|> {final formatted, precise, and clear solution} <|end_of_solution|>",
             "Now, try to solve the following question through the above guidelines:"
         ]
+
+
+class CompetitionMathReader(GSM8KReader):
+    """Reader for free-form competition problems with boxed final answers."""
+
+    file_path: str
+    dataset_name: str
+
+    def __init__(self):
+        self.meta_db = read_json(self.file_path)
+        self.data_list = list(self.meta_db[self.dataset_name])
+
+    def get_prompt(self, idx: int) -> str:
+        return (
+            "Put your final answer within \\boxed{}. "
+            + self.data_list[idx]['question']
+        )
+
+    def get_prompt_list(self, idx: int) -> List[str]:
+        return [
+            "Put your final answer within \\boxed{}.",
+            self.data_list[idx]['question'],
+        ]
+
+    @staticmethod
+    def _normalize_math_answer(answer: str) -> str:
+        normalized = str(answer).strip()
+        if normalized.startswith('$') and normalized.endswith('$'):
+            normalized = normalized[1:-1]
+        normalized = normalized.replace('\\dfrac', '\\frac')
+        normalized = normalized.replace('\\tfrac', '\\frac')
+        normalized = normalized.replace('\\left', '').replace('\\right', '')
+        normalized = normalized.replace('\\cdot', '').replace('\\times', '')
+        normalized = normalized.replace('*', '')
+        normalized = re.sub(r'\\(?:,|;|!| )', '', normalized)
+        normalized = re.sub(r'\s+', '', normalized)
+        text_match = re.fullmatch(r'\\text\{(.*)\}', normalized)
+        if text_match:
+            normalized = text_match.group(1)
+        if re.fullmatch(r'[+-]?\d+', normalized):
+            normalized = str(int(normalized))
+        else:
+            latex_fraction = re.fullmatch(r'\\frac\{([+-]?\d+)\}\{([+-]?\d+)\}', normalized)
+            slash_fraction = re.fullmatch(r'([+-]?\d+)/([+-]?\d+)', normalized)
+            fraction_match = latex_fraction or slash_fraction
+            if fraction_match and int(fraction_match.group(2)) != 0:
+                value = Fraction(int(fraction_match.group(1)), int(fraction_match.group(2)))
+                normalized = f'{value.numerator}/{value.denominator}'
+        if ',' in normalized:
+            normalized = ','.join(sorted(part for part in normalized.split(',') if part))
+        return normalized
+
+    def compare_answer(self, model_answer: str, gt_answer: str, idx: int) -> Tuple[bool, str]:
+        if model_answer in ("error", "", None):
+            return False, f"`{model_answer}` <=> `{gt_answer}`"
+        left_part = self._normalize_math_answer(model_answer)
+        right_part = self._normalize_math_answer(gt_answer)
+        return left_part == right_part, f"`{left_part}` <=> `{right_part}`"
+
+    def get_answer(self, idx: int) -> str:
+        return str(self.data_list[idx]['answer'])
+
+
+class AIME2026Reader(CompetitionMathReader):
+    file_path = DATASET_PATH['aime_2026']
+    dataset_name = 'aime_2026'
+
+
+class HMMTFeb2025Reader(CompetitionMathReader):
+    file_path = DATASET_PATH['hmmt_feb_2025']
+    dataset_name = 'hmmt_feb_2025'
 
 class GPQAReader(Reader):
     

@@ -5,6 +5,8 @@ import jsonlines
 from typing import *
 from tqdm import tqdm
 import os
+import re
+from fractions import Fraction
 from pathlib import Path
 
 from utils import _print, read_jsonl
@@ -45,7 +47,40 @@ class Reference:
 
         return None
 
+    @staticmethod
+    def _normalize_competition_answer(answer: str) -> str:
+        normalized = str(answer).strip()
+        if normalized.startswith('$') and normalized.endswith('$'):
+            normalized = normalized[1:-1]
+        normalized = normalized.replace(r'\dfrac', r'\frac')
+        normalized = normalized.replace(r'\tfrac', r'\frac')
+        normalized = normalized.replace(r'\left', '').replace(r'\right', '')
+        normalized = normalized.replace(r'\cdot', '').replace(r'\times', '')
+        normalized = normalized.replace('*', '')
+        normalized = re.sub(r'\\(?:,|;|!| )', '', normalized)
+        normalized = re.sub(r'\s+', '', normalized)
+        text_match = re.fullmatch(r'\\text\{(.*)\}', normalized)
+        if text_match:
+            normalized = text_match.group(1)
+        if re.fullmatch(r'[+-]?\d+', normalized):
+            normalized = str(int(normalized))
+        else:
+            latex_fraction = re.fullmatch(r'\\frac\{([+-]?\d+)\}\{([+-]?\d+)\}', normalized)
+            slash_fraction = re.fullmatch(r'([+-]?\d+)/([+-]?\d+)', normalized)
+            fraction_match = latex_fraction or slash_fraction
+            if fraction_match and int(fraction_match.group(2)) != 0:
+                value = Fraction(int(fraction_match.group(1)), int(fraction_match.group(2)))
+                normalized = f'{value.numerator}/{value.denominator}'
+        if ',' in normalized:
+            normalized = ','.join(sorted(part for part in normalized.split(',') if part))
+        return normalized
+
     def compare(self, idx:int, model_ans:str, model_output:str) -> bool:
+        if self.dataset_name in ('aime_2026', 'hmmt_feb_2025'):
+            left = self._normalize_competition_answer(model_ans)
+            right = self._normalize_competition_answer(self.meta_data_list[idx]['answer'])
+            if left == right:
+                return True
         if model_ans in self.meta_data_list[idx]['alias']:
             return True
         elif model_ans in self.meta_data_list[idx]['error']:

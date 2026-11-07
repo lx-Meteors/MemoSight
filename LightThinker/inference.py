@@ -15,7 +15,16 @@ from config import Config
 from tokenizer import Tokenizer
 from model_llama import LlamaForCausalLM
 from model_qwen import Qwen3ForCausalLM
-from dataset_reader import GPQAReader, MMLUReader, BBHReader, GSM8KReader, Reader
+from rkv import RKVCacheCompressor, RKVConfig
+from dataset_reader import (
+    AIME2026Reader,
+    BBHReader,
+    GPQAReader,
+    GSM8KReader,
+    HMMTFeb2025Reader,
+    MMLUReader,
+    Reader,
+)
 from dataset_reader_cot import MMLUCOTReader, BBHCOTReader, GSM8KCOTReader, GPQACOTReader, DISTILLCOTReader
 
 DEBUG:bool=False
@@ -325,6 +334,8 @@ class AttentionUtils:
         max_comp_size:int=10,
         n_inst:int=0,
         n_continue:int=1,
+        update_attention_method:str="global",
+        max_step_size:int=None,
     ):
         """
         args:
@@ -357,29 +368,48 @@ class AttentionUtils:
         self.max_length:int = max_length
         self.attention_config:Dict = attention_config
         self.prefill_compress:bool = prefill_compress
+        self.update_attention_method = update_attention_method
+        assert self.update_attention_method in ("global", "local")
 
         self.min_dtype = torch.finfo(dtype).min
 
-        # this is used for global attention.
-        # this is always a lower triangular matrix
+        # Global mode keeps the original square buffers for debugging.  Local
+        # decoding only needs rows for one decode step, so its memory is linear
+        # in max_length instead of quadratic (important for 24K+ generation).
+        if self.update_attention_method == "local":
+            if max_step_size is None:
+                max_step_size = max_comp_size + n_continue + 1
+            self.max_step_size = min(max_length, max(1, int(max_step_size)))
+            base_size = self.max_step_size
+            delta_shape = (self.max_step_size, max_length)
+            cur_size = 0
+        else:
+            self.max_step_size = max_length
+            base_size = max_length
+            delta_shape = (max_length, max_length)
+            cur_size = max_length
+
         self.base_attn = torch.triu(
             torch.full(
-                (max_length, max_length), fill_value=self.min_dtype, dtype=self.dtype, device=self.device
+                (base_size, base_size), fill_value=self.min_dtype, dtype=self.dtype, device=self.device
             ),
             diagonal=1
         )
         # this is used for local attention.
         # as a matter of fact, if we use kv cache, the attention mask shape is [n_new_token, all_token]
         self.delta_attn = torch.full(
-            (max_length, max_length), fill_value=0., dtype=self.dtype, device=self.device
+            delta_shape, fill_value=0., dtype=self.dtype, device=self.device
         )
         # this is used for global attention during inference.
-        self.cur_attn = torch.triu(
-            torch.full(
-                (max_length, max_length), fill_value=self.min_dtype, dtype=self.dtype, device=self.device
-            ),
-            diagonal=1
-        )
+        if cur_size > 0:
+            self.cur_attn = torch.triu(
+                torch.full(
+                    (cur_size, cur_size), fill_value=self.min_dtype, dtype=self.dtype, device=self.device
+                ),
+                diagonal=1
+            )
+        else:
+            self.cur_attn = torch.empty((0, 0), dtype=self.dtype, device=self.device)
 
         # mask value
         self.mask_value = self.min_dtype
@@ -405,6 +435,16 @@ class AttentionUtils:
             [text_start, text_end, n_inst, comp_start, comp_end, n_cont]
         """
         self.reset()
+        if self.update_attention_method == "local":
+            self.cur_attn = torch.triu(
+                torch.full(
+                    (length, length),
+                    fill_value=self.min_dtype,
+                    dtype=self.dtype,
+                    device=self.device,
+                ),
+                diagonal=1,
+            )
         self.last_idx = length
         self.global_indicator_list.extend(indicator_list)
 
@@ -597,6 +637,17 @@ class AttentionUtils:
             - new_length
         """
 
+        if new_length > self.delta_attn.shape[0]:
+            raise ValueError(
+                f"Local attention step has {new_length} rows, exceeding "
+                f"the configured capacity {self.delta_attn.shape[0]}."
+            )
+        if origin_length + new_length > self.delta_attn.shape[1]:
+            raise ValueError(
+                f"Local attention length {origin_length + new_length} exceeds "
+                f"the configured maximum {self.delta_attn.shape[1]}."
+            )
+
         # initialization
         self.delta_attn[0:new_length, 0:origin_length+new_length] = self.show_value
         self.delta_attn[0:new_length, origin_length:origin_length+new_length] = self.base_attn[0:new_length, 0:new_length]
@@ -656,6 +707,16 @@ class AttentionUtils:
         - register query can attend itself
         """
         new_length = len(new_input_ids)
+        if new_length > self.delta_attn.shape[0]:
+            raise ValueError(
+                f"Local MTP attention step has {new_length} rows, exceeding "
+                f"the configured capacity {self.delta_attn.shape[0]}."
+            )
+        if origin_length + new_length > self.delta_attn.shape[1]:
+            raise ValueError(
+                f"Local MTP attention length {origin_length + new_length} exceeds "
+                f"the configured maximum {self.delta_attn.shape[1]}."
+            )
         self.delta_attn[0:new_length, 0:origin_length+new_length] = self.show_value
         self.delta_attn[0:new_length, origin_length:origin_length+new_length] = self.base_attn[0:new_length, 0:new_length]
 
@@ -707,7 +768,10 @@ class AttentionUtils:
         return self.delta_attn[0:new_length, 0:origin_length+new_length].unsqueeze(dim=0).unsqueeze(dim=0)
         
     def reset(self):
-        self.cur_attn[:, :] = self.base_attn[:, :]
+        if self.update_attention_method == "global":
+            self.cur_attn[:, :] = self.base_attn[:, :]
+        else:
+            self.cur_attn = torch.empty((0, 0), dtype=self.dtype, device=self.device)
         self.last_idx = 0
         self.global_indicator_list.clear()
         self.delta_attn[:] = self.show_value
@@ -1639,6 +1703,64 @@ def _sentence_level_generate(
 # 2.多token和单token存在计算差异计算 
 # 导致某些位置（例如 to 和 for）logit差异过小而选择了不同的token
 @torch.no_grad()
+def _rkv_generate(
+    model: Qwen3ForCausalLM,
+    tokenizer: Tokenizer,
+    max_new_tokens: int,
+    kv_utils: KVUtils,
+    token_utils: TokenUtils,
+    predicted_token_id: int,
+    compressor: RKVCacheCompressor,
+    repetition_penalty: float = 1.0,
+) -> Tuple[str, str]:
+    """Vanilla autoregressive decoding with periodic R-KV cache eviction."""
+    new_token_counters = 0
+    eos_token_id = tokenizer.eos_token_id
+
+    # The prefill queries seed R-KV's alpha-token observation window. Prompt
+    # KVs remain untouched until the first decode buffer is complete.
+    compressor.observe_queries(model)
+    compressor.peak_cache_tokens = max(
+        compressor.peak_cache_tokens, kv_utils.get_cache().get_seq_length()
+    )
+
+    while predicted_token_id != eos_token_id and new_token_counters < max_new_tokens:
+        token_utils.show_output_input_ids.append(predicted_token_id)
+        if token_utils.max_length <= token_utils._seen_tokens:
+            break
+
+        input_ids, position_ids = token_utils.set_input_ids(
+            [predicted_token_id], return_tensors=True
+        )
+        # Preserve the original logical timeline after physical KV eviction;
+        # DynamicCache would otherwise restart positions from its compact size.
+        model_output = model(
+            input_ids=input_ids,
+            attention_mask=None,
+            past_key_values=kv_utils.get_cache(),
+            use_cache=True,
+            return_dict=True,
+            position_ids=position_ids,
+            cache_position=position_ids.reshape(-1),
+        )
+        compressor.after_decode_forward(model, kv_utils.get_cache())
+        predicted_token_id = InferenceUtils.get_predicted_token_ids(
+            model_output=model_output,
+            idx=-1,
+            token_utils=token_utils,
+            repetition_penalty=repetition_penalty,
+            tokenizer=tokenizer,
+        )
+        new_token_counters += 1
+
+    token_utils.show_output_input_ids.append(predicted_token_id)
+    return (
+        tokenizer.decode(token_utils.show_prompt_input_ids),
+        tokenizer.decode(token_utils.show_output_input_ids),
+    )
+
+
+@torch.no_grad()
 def _sentence_level_mtp_register_generate(
     model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
@@ -2058,10 +2180,16 @@ def generate(
     spec_decode:bool=False,
     mtp_draft_len:int=None,
     mtp_stats:"MTPStats"=None,
+    rkv_config:RKVConfig=None,
+    rkv_stats:Dict=None,
 ) -> Tuple[str,str]:
 
     assert update_attention_method in ['global', 'local'], update_attention_method
     kv_utils = KVUtils()
+    rkv_compressor = None
+    if rkv_config is not None:
+        rkv_compressor = RKVCacheCompressor(rkv_config)
+        rkv_compressor.enable_query_capture(model)
 
     # 1. prefill
     predicted_token_id, last_hidden_state = prefill(
@@ -2082,7 +2210,20 @@ def generate(
     )
 
     # 2. auto-regressive generation
-    if comp_config.output_comp_level == 'token':
+    if rkv_compressor is not None:
+        prompt, output = _rkv_generate(
+            model=model,
+            tokenizer=tokenizer,
+            max_new_tokens=max_new_tokens,
+            kv_utils=kv_utils,
+            token_utils=token_utils,
+            predicted_token_id=predicted_token_id,
+            compressor=rkv_compressor,
+            repetition_penalty=repetition_penalty,
+        )
+        if rkv_stats is not None:
+            rkv_stats.update(rkv_compressor.summary())
+    elif comp_config.output_comp_level == 'token':
         prompt, output = _token_level_generate(
             model=model,
             tokenizer=tokenizer,
@@ -2149,11 +2290,36 @@ def get_parser():
     parser.add_argument('--ckpt', type=int)
     parser.add_argument('--tokenizer_path', type=str)
     parser.add_argument('--compress_config', type=str)
-    parser.add_argument('--max_new_tokens', type=int)
+    parser.add_argument('--max_new_tokens', type=int, default=24 * 1024)
     parser.add_argument('--repetition_penalty', type=float, default=1.0)
     parser.add_argument('--output_tag', type=str)
     parser.add_argument('--model_type', type=str, choices=['qwen', 'llama'])
     parser.add_argument('--model_path', type=str, default=None)
+    parser.add_argument(
+        '--vanilla',
+        type=str2bool,
+        default=False,
+        help='Keep the base tokenizer/vocabulary and disable compression-token registration.',
+    )
+    parser.add_argument(
+        '--rkv',
+        type=str2bool,
+        default=False,
+        help='Enable training-free R-KV decoding on the Vanilla Qwen3 checkpoint.',
+    )
+    parser.add_argument('--rkv_budget', type=int, default=1536)
+    parser.add_argument('--rkv_buffer_size', type=int, default=128)
+    parser.add_argument('--rkv_window_size', type=int, default=8)
+    parser.add_argument('--rkv_kernel_size', type=int, default=7)
+    parser.add_argument('--rkv_mix_lambda', type=float, default=0.1)
+    parser.add_argument('--rkv_retain_ratio', type=float, default=0.2)
+    parser.add_argument(
+        '--rkv_retain_direction',
+        type=str,
+        choices=['last', 'first'],
+        default='last',
+    )
+    parser.add_argument('--rkv_similarity_threshold', type=float, default=0.5)
 
     parser.add_argument('--bos_token', type=str)
     parser.add_argument('--eos_token', type=str)
@@ -2168,7 +2334,7 @@ def get_parser():
     parser.add_argument('--output_compress_instruction', type=str)
     parser.add_argument('--prefill_compress', type=str2bool, default=True)
     parser.add_argument('--compress_prompt', type=str2bool, default=True)
-    parser.add_argument('--update_attention_method', type=str, choices=['global', 'local'])
+    parser.add_argument('--update_attention_method', type=str, choices=['global', 'local'], default='local')
     # ==============================
 
     parser.add_argument('--split_size', type=int)
@@ -2187,7 +2353,7 @@ def get_parser():
         type=str,
         nargs='+',  # 允许多个值
         default=['mmlu', 'gsm8k', 'gpqa', 'bbh'],  # 默认全部
-        choices=['mmlu', 'gsm8k', 'gpqa', 'bbh'],
+        choices=['mmlu', 'gsm8k', 'gpqa', 'bbh', 'aime_2026', 'hmmt_feb_2025'],
         help='Datasets to evaluate. Can specify multiple: --datasets mmlu gsm8k'
     )
 
@@ -2215,11 +2381,12 @@ def get_model_and_tokenizer(
         add_prefix_space=False,
     )
 
-    for token in comp_config.special_token_name_list:
-        if tokenizer.convert_tokens_to_ids(token) == None:
-            special_token_list.append(token)
-    if len(special_token_list) > 0:
-        tokenizer.add_special_token(special_token_list)
+    if not args.vanilla:
+        for token in comp_config.special_token_name_list:
+            if tokenizer.convert_tokens_to_ids(token) == None:
+                special_token_list.append(token)
+        if len(special_token_list) > 0:
+            tokenizer.add_special_token(special_token_list)
 
     # NOTE: force sdpa. The compression engine (single-seq AND batched) feeds hand-built
     # 4D additive attention masks; flash_attention_2 rejects 4D masks (model_qwen.py:1004),
@@ -2275,16 +2442,19 @@ def eval_dataset(
     spec_decode:bool=False,
     mtp_draft_len:int=None,
     profile_breakdown:bool=False,
+    rkv_config:RKVConfig=None,
 ):
 
     if split_size != None and index != None:
         assert index > 0
         assert index <= split_size
-        step = len(reader) // split_size
-        start = (index-1) * step
-        end = index * step
-        if index == split_size:
-            end = len(reader)
+        # Balance the remainder across early shards.  The previous floor-only
+        # split assigned every sample to the final process when len < split_size
+        # (for example, 30 competition problems over 32 workers).
+        base_size, remainder = divmod(len(reader), split_size)
+        shard_offset = index - 1
+        start = shard_offset * base_size + min(shard_offset, remainder)
+        end = start + base_size + (1 if shard_offset < remainder else 0)
     elif split_size == None and index == None:
         start = 0
         end = len(reader)
@@ -2326,7 +2496,9 @@ def eval_dataset(
         prefill_compress=prefill_compress,
         max_comp_size=max_comp_size,
         n_inst=0,
-        n_continue=1
+        n_continue=1,
+        update_attention_method=update_attention_method,
+        max_step_size=max_comp_size + 2 + max(0, mtp_draft_len or 2),
     )
     token_utils = TokenUtils(
         max_length=max_new_tokens + max_prompt_len,
@@ -2361,6 +2533,7 @@ def eval_dataset(
             system_prompt_list:List[str] = reader.get_system_prompt_list()
 
             sample_stats = MTPStats(profile=profile_breakdown) if spec_decode else None
+            sample_rkv_stats = {} if rkv_config is not None else None
             start_time = time.time()
             prompt, output = generate(
                 question=question,
@@ -2385,6 +2558,8 @@ def eval_dataset(
                 spec_decode=spec_decode,
                 mtp_draft_len=mtp_draft_len,
                 mtp_stats=sample_stats,
+                rkv_config=rkv_config,
+                rkv_stats=sample_rkv_stats,
             )
             end_time = time.time()
             input_len:int = len(token_utils.show_prompt_input_ids)
@@ -2405,6 +2580,8 @@ def eval_dataset(
                 prompt=prompt,
                 input_len=input_len,
                 output_len=output_len,
+                max_new_tokens=max_new_tokens,
+                hit_max_new_tokens=output_len >= max_new_tokens,
                 infer_time=end_time-start_time,
                 comp_pattern=comp_pattern,
                 max_token=token_utils.max_token
@@ -2414,6 +2591,9 @@ def eval_dataset(
                     int(mtp_draft_len) if mtp_draft_len is not None else 2
                 )
                 record["mtp_stats"] = sample_stats.summary()
+            if sample_rkv_stats is not None:
+                record["rkv_stats"] = sample_rkv_stats
+                record["peak_kv_tokens"] = sample_rkv_stats["peak_kv_tokens"]
             writer.write(record)
             pbar.set_description(f"model:`{model_answer}`; gt:`{gt_answer}`; correct:{acc_state}; acc: {acc}/{total}={round(acc/total, 5)}; input: {input_len}; output: {output_len}; `{comp_pattern}`; max_token: {token_utils.max_token}")
             token_utils.reset()
@@ -2435,6 +2615,32 @@ def main():
         args.model_short_tag = args.model_tag
     print(args)
 
+    rkv_config = None
+    if args.rkv:
+        if not args.vanilla:
+            raise ValueError('R-KV must be combined with --vanilla true')
+        if args.model_type.lower() != 'qwen':
+            raise ValueError('This local R-KV adapter currently supports Qwen3 only')
+        if args.use_EPL or args.spec_decode or args.prefill_compress or args.compress_prompt:
+            raise ValueError(
+                'R-KV is a Vanilla decode-time method: disable EPL, speculative decoding, '
+                'and prompt/prefill compression'
+            )
+        if args.rolling_rope:
+            raise ValueError('R-KV requires the original logical RoPE timeline')
+        rkv_config = RKVConfig(
+            budget=args.rkv_budget,
+            buffer_size=args.rkv_buffer_size,
+            window_size=args.rkv_window_size,
+            kernel_size=args.rkv_kernel_size,
+            mix_lambda=args.rkv_mix_lambda,
+            retain_ratio=args.rkv_retain_ratio,
+            retain_direction=args.rkv_retain_direction,
+            similarity_threshold=args.rkv_similarity_threshold,
+        )
+        rkv_config.validate()
+        print(f'R-KV config: {rkv_config}')
+
     comp_config = Config.from_file(args.compress_config)
     attention_config = dict(
         diagonal=args.diagonal,
@@ -2454,6 +2660,8 @@ def main():
         "gsm8k": GSM8KReader(),
         "gpqa": GPQAReader(),
         "bbh": BBHReader(),
+        "aime_2026": AIME2026Reader(),
+        "hmmt_feb_2025": HMMTFeb2025Reader(),
     }
 
     task_list = [(all_tasks[name], name) for name in args.datasets if name in all_tasks]
@@ -2493,6 +2701,7 @@ def main():
             spec_decode=args.spec_decode,
             mtp_draft_len=args.mtp_draft_len,
             profile_breakdown=args.profile_breakdown,
+            rkv_config=rkv_config,
         )
 
 if __name__ == '__main__':

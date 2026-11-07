@@ -23,6 +23,7 @@ class MyDataset(torch.utils.data.Dataset):
         change_rope: bool=False,
         output_compress_instruction:str=None,
         use_EPL=False,
+        mode:str='aug-wo-pc',
     ):
         self.check_consistency = False
         self.train_on_input:bool = train_on_input
@@ -45,10 +46,12 @@ class MyDataset(torch.utils.data.Dataset):
         self.output_compress_instruction:str = output_compress_instruction if output_compress_instruction != None else ""
 
         self.use_EPL = use_EPL
+        self.mode = mode
         
         # 预处理
         self.init()
-        self.init_for_aug_data_wo_pc()
+        if self.mode != 'normal':
+            self.init_for_aug_data_wo_pc()
     
     #token level，感觉没用到
     def insert_comp_for_output(self, output:str) -> Tuple[List[str], List[List[int]]]:
@@ -224,7 +227,8 @@ class MyDataset(torch.utils.data.Dataset):
 
     def init(self):
         _print("initializing the dataset ...")
-        self.config.convert2id(self.tokenizer)
+        if self.mode != 'normal':
+            self.config.convert2id(self.tokenizer)
 
         pbar = tqdm(total=len(self.meta_data))
         for item in self.meta_data:
@@ -269,6 +273,10 @@ class MyDataset(torch.utils.data.Dataset):
                     meta_info=item,
                 )
             )
+            if self.mode == 'normal':
+                pbar.update(1)
+                continue
+
             #应该是在这里进行数据处理，并进行mask
             # 'save', 'abandoned', 'compressed-prompt', 'compressed-output'
             structured_input:List[List] = list()
@@ -491,7 +499,9 @@ class MyDataset(torch.utils.data.Dataset):
             )
 
 
-    def __getitem__(self, idx:int) -> Tuple[Dict, Dict, Dict, Dict, Dict]:
+    def __getitem__(self, idx:int) -> Tuple[Dict, Dict, Dict, Dict, Dict, Dict]:
+        if self.mode == 'normal':
+            return (self.normal_data[idx], None, None, None, None, None)
         return (
             self.normal_data[idx],
             self.aug_data[idx],

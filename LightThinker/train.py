@@ -262,14 +262,16 @@ def get_model_and_tokenizer(
         special_token_list=None,
         add_prefix_space=False,
     )
-    assert len(comp_config.special_token_desp_list) == len(comp_config.special_token_name_list)
-    for desp, token in zip(comp_config.special_token_desp_list, comp_config.special_token_name_list):
-        if tokenizer.convert_tokens_to_ids(token) == None:
-            special_token_list.append(token)
-            # special_token_desp_list.append(desp)
-            special_token_desp_dict[token] = desp
-    if len(special_token_list) > 0:
-        tokenizer.add_special_token(special_token_list)
+    # A true Vanilla run must keep the base tokenizer/vocabulary unchanged.
+    # Compression modes still add their control and compression tokens.
+    if args.mode != 'normal':
+        assert len(comp_config.special_token_desp_list) == len(comp_config.special_token_name_list)
+        for desp, token in zip(comp_config.special_token_desp_list, comp_config.special_token_name_list):
+            if tokenizer.convert_tokens_to_ids(token) == None:
+                special_token_list.append(token)
+                special_token_desp_dict[token] = desp
+        if len(special_token_list) > 0:
+            tokenizer.add_special_token(special_token_list)
     
     if args.model_type == 'llama':
         model_class = LlamaForCausalLM
@@ -364,6 +366,7 @@ def get_dataset_and_data_collator(
         change_rope=False,
         output_compress_instruction=args.output_compress_instruction,
         use_EPL=args.use_EPL,
+        mode=args.mode,
     )
 
     data_collator = MyDataCollator(
