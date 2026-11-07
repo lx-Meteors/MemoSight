@@ -47,7 +47,7 @@ LOGIT_CHUNK_SIZE="${LOGIT_CHUNK_SIZE:-128}"
 PREFILL_COMPRESS="${PREFILL_COMPRESS:-false}"
 
 # 固定使用该环境的 Python，避免 deepspeed/系统 Python 串环境。
-MEMOSIGHT_ENV_BIN="${MEMOSIGHT_ENV_BIN:-/opt/conda/envs/memosight/bin}"
+MEMOSIGHT_ENV_BIN="${MEMOSIGHT_ENV_BIN:-/home/yyk/yyk06/Miniconda/miniconda3/envs/memosight/bin}"
 PYTHON_BIN="${PYTHON_BIN:-${MEMOSIGHT_ENV_BIN}/python}"
 ANALYSIS_SCRIPT="${PROJECT_ROOT}/LightThinker/analysis_upl_attention.py"
 
@@ -160,16 +160,7 @@ for index in "${!SAMPLE_ARRAY[@]}"; do
         PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/LightThinker${PYTHONPATH:+:${PYTHONPATH}}" \
         CUDA_VISIBLE_DEVICES="${gpu_id}" \
         TOKENIZERS_PARALLELISM=false \
-        bash -c '
-            lock_file="$1"
-            shift
-            exec 9>"${lock_file}"
-            if ! flock -n 9; then
-                echo "错误：sample 目录已有分析任务运行：${lock_file}" >&2
-                exit 73
-            fi
-            exec "$@"
-        ' bash "${lock_file}" \
+        flock -n "${lock_file}" \
         "${PYTHON_BIN}" "${ANALYSIS_SCRIPT}" \
             --model_path "${MEMOSIGHT_MODEL_PATH}" \
             --baseline_model_path "${LIGHTTHINKER_MODEL_PATH}" \

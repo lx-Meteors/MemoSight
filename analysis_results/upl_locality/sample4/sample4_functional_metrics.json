@@ -1,0 +1,106 @@
+{
+  "regime": "B (two checkpoints, each trained layout)",
+  "sample_index": 4,
+  "memosight_checkpoint": "/home/yyk/yyk06/hpc/liuxin/MemoSight/experiments/qwen3_8b_memosight/train/checkpoint-1305",
+  "lightthinker_checkpoint": "/home/yyk/yyk06/hpc/liuxin/MemoSight/experiments/qwen3_8b_lightthinker/train/checkpoint-1305",
+  "memosight_config": "/home/yyk/yyk06/hpc/liuxin/MemoSight/configs/LightThinker/qwen/adaptive_mtp_v1.json",
+  "lightthinker_config": "/home/yyk/yyk06/hpc/liuxin/MemoSight/configs/LightThinker/qwen/v1.json",
+  "memosight_sequence_length": 2654,
+  "lightthinker_sequence_length": 2491,
+  "memosight_layers": [
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24
+  ],
+  "lightthinker_layers": [
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24
+  ],
+  "functional_metrics": {
+    "global_nll_upl": 0.10888876130570581,
+    "global_nll_contiguous": 0.11474225118562772,
+    "global_delta": 0.0058534898799219165,
+    "n_positions_upl": 1848,
+    "n_positions_contiguous": 1848,
+    "buckets": [
+      {
+        "label": "0-64",
+        "nll_upl": 0.055654269491184696,
+        "nll_contiguous": 0.055895928000305524,
+        "delta": 0.0002416585091208276,
+        "count_upl": 521,
+        "count_contiguous": 521
+      },
+      {
+        "label": "64-128",
+        "nll_upl": 0.1069065827243733,
+        "nll_contiguous": 0.1232108732439437,
+        "delta": 0.0163042905195704,
+        "count_upl": 848,
+        "count_contiguous": 848
+      },
+      {
+        "label": "128-256",
+        "nll_upl": 0.1446430187870339,
+        "nll_contiguous": 0.14182706731529052,
+        "delta": -0.0028159514717433776,
+        "count_upl": 414,
+        "count_contiguous": 414
+      },
+      {
+        "label": "256+",
+        "nll_upl": 0.33371637784517727,
+        "nll_contiguous": 0.30342577420748196,
+        "delta": -0.030290603637695312,
+        "count_upl": 65,
+        "count_contiguous": 65
+      }
+    ]
+  },
+  "segments": [
+    {
+      "segment_index": 9,
+      "upl_raw_length": 304,
+      "baseline_raw_length": 304,
+      "upl_n_comp": 51,
+      "baseline_n_comp": 9,
+      "upl_norm_offset": 0.007610939112487101,
+      "baseline_norm_offset": 0.23355263157894737
+    },
+    {
+      "segment_index": 5,
+      "upl_raw_length": 246,
+      "baseline_raw_length": 246,
+      "upl_n_comp": 41,
+      "baseline_n_comp": 9,
+      "upl_norm_offset": 0.012294269284156256,
+      "baseline_norm_offset": 0.3247515808491418
+    },
+    {
+      "segment_index": 2,
+      "upl_raw_length": 240,
+      "baseline_raw_length": 240,
+      "upl_n_comp": 40,
+      "baseline_n_comp": 9,
+      "upl_norm_offset": 0.009583333333333333,
+      "baseline_norm_offset": 0.29907407407407405
+    }
+  ]
+}

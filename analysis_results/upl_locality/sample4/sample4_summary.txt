@@ -1,0 +1,5 @@
+regime: B (two checkpoints, each trained layout)
+continuation NLL: MemoSight=0.108889 LightThinker=0.114742 delta=+0.005853
+segment #9: MemoSight offset=0.007611, LightThinker offset=0.233553
+segment #5: MemoSight offset=0.012294, LightThinker offset=0.324752
+segment #2: MemoSight offset=0.009583, LightThinker offset=0.299074

@@ -12,7 +12,7 @@ DEFAULT_PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # 项目、基础模型、Tokenizer、训练数据和训练产物目录
 PROJECT_ROOT="${PROJECT_ROOT:-${DEFAULT_PROJECT_ROOT}}"
-BASE_MODEL_PATH="${BASE_MODEL_PATH:-Qwen/Qwen3-8B}"
+BASE_MODEL_PATH="${BASE_MODEL_PATH:-/home/yyk/yyk06/hpc/hf_sources/hf_Models/Qwen/Qwen3-8B}"
 TOKENIZER_PATH="${TOKENIZER_PATH:-${BASE_MODEL_PATH}}"
 TRAIN_DATA_PATH="${TRAIN_DATA_PATH:-${PROJECT_ROOT}/data/train/train.jsonl}"
 OUTPUT_BASE_DIR="${OUTPUT_BASE_DIR:-${PROJECT_ROOT}/experiments}"
