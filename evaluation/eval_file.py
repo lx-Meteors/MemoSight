@@ -150,6 +150,20 @@ class Evaluator:
             for item in data_list:
                 self.eval_data_list.append(item)
 
+        # Never publish a metric from mixed/stale shard layouts.  Every item
+        # in the benchmark reference must occur exactly once.
+        actual_ids = [int(item['idx']) for item in self.eval_data_list]
+        expected_ids = list(range(len(self.reference.meta_data_list)))
+        if sorted(actual_ids) != expected_ids:
+            duplicate_ids = sorted({idx for idx in actual_ids if actual_ids.count(idx) > 1})
+            missing_ids = sorted(set(expected_ids) - set(actual_ids))
+            extra_ids = sorted(set(actual_ids) - set(expected_ids))
+            raise ValueError(
+                f"Invalid evaluation shard coverage for {self.args.dataset}: "
+                f"expected {len(expected_ids)} unique items, got {len(actual_ids)}; "
+                f"duplicates={duplicate_ids}, missing={missing_ids}, extra={extra_ids}"
+            )
+
     def _cal_attend(
         self, 
         len_prompt:int, 
@@ -203,6 +217,13 @@ class Evaluator:
             return round(0, rounds)
         return round(sum(l) / len(l) * scale, rounds)
 
+    def percentile(self, values:List[int], quantile:float) -> int:
+        if not values:
+            return 0
+        ordered = sorted(values)
+        index = round((len(ordered) - 1) * quantile)
+        return ordered[index]
+
     def metrics2str(self, metrics:Dict) -> str:
         # 构建结果保存路径（模型路径在前，数据集路径在后）
         if self.args.model_tag:
@@ -227,10 +248,16 @@ class Evaluator:
             (f"speed: {round(sum(metrics['output_len_list'])/sum(metrics['infer_time_list']), 2) if sum(metrics['infer_time_list']) > 0 else 0} tok/s"),
             (f"attend: {self.avg(metrics['attend_list'])}"),
             (f"output len: {self.avg(metrics['output_len_list'])}"),
+            (f"output len min/p50/p90/max: {min(metrics['output_len_list'])}/{self.percentile(metrics['output_len_list'], 0.5)}/{self.percentile(metrics['output_len_list'], 0.9)}/{max(metrics['output_len_list'])}"),
             (f"total len: {self.avg(metrics['total_len_list'])}"),
-            (f"peak mem: {self.avg(metrics['peak_mem_list'])}"),
+            (f"peak KV tokens avg/max: {self.avg(metrics['peak_mem_list'])}/{max(metrics['peak_mem_list'])}"),
+            (f"peak GPU allocated GiB avg/max: {self.avg(metrics['peak_gpu_allocated_gib_list'])}/{round(max(metrics['peak_gpu_allocated_gib_list']), 2)}"),
+            (f"peak GPU reserved GiB avg/max: {self.avg(metrics['peak_gpu_reserved_gib_list'])}/{round(max(metrics['peak_gpu_reserved_gib_list']), 2)}"),
+            (f"over 8K: {metrics['over_8k']}/{metrics['total']} ({round(metrics['over_8k']/metrics['total']*100, 2)}%)"),
+            (f"over 16K: {metrics['over_16k']}/{metrics['total']} ({round(metrics['over_16k']/metrics['total']*100, 2)}%)"),
+            (f"hit 24K cap: {metrics['hit_max']}/{metrics['total']} ({round(metrics['hit_max']/metrics['total']*100, 2)}%)"),
             (f"compress: {self.avg(metrics['compress_cnt_list'])}"),
-            (f"{round(metrics['correct']/metrics['total']*100, 2)},{round(sum(metrics['infer_time_list'])/3600, 2)},{round(sum(metrics['output_len_list'])/sum(metrics['infer_time_list']), 2) if sum(metrics['infer_time_list']) > 0 else 0},{int(round(self.avg(metrics['attend_list']),0))},{int(round(self.avg(metrics['output_len_list']), 0))},{int(round(self.avg(metrics['peak_mem_list']),0))},{int(round(self.avg(metrics['compress_cnt_list']),0))}"),
+            (f"{round(metrics['correct']/metrics['total']*100, 2)},{round(sum(metrics['infer_time_list'])/3600, 2)},{round(sum(metrics['output_len_list'])/sum(metrics['infer_time_list']), 2) if sum(metrics['infer_time_list']) > 0 else 0},{int(round(self.avg(metrics['attend_list']),0))},{int(round(self.avg(metrics['output_len_list']), 0))},{int(round(self.avg(metrics['peak_mem_list']),0))},{self.avg(metrics['peak_gpu_allocated_gib_list'])},{self.avg(metrics['peak_gpu_reserved_gib_list'])},{int(round(self.avg(metrics['compress_cnt_list']),0))}"),
         ]
         result_path = f'{base_path}/result.txt'
         if not os.path.exists(result_path):
@@ -272,12 +299,17 @@ class Evaluator:
             correct=0,
             infer_time_list=list(),
             peak_mem_list=list(),
+            peak_gpu_allocated_gib_list=list(),
+            peak_gpu_reserved_gib_list=list(),
             attend_list=list(),
             compress_cnt_list=list(),
             prompt_len_list=list(),
             output_len_list=list(),
             total_len_list=list(),
             compress_list=list(),      
+            over_8k=0,
+            over_16k=0,
+            hit_max=0,
         )
 
         pbar = tqdm(total=len(self.eval_data_list))
@@ -312,14 +344,19 @@ class Evaluator:
             output:str = item[model_output_key]
             prompt_len:int = len(self.tokenizer.tokenizer(prompt, return_tensors=None)['input_ids'])
             output_id_list:List[int] = self.tokenizer.tokenizer(output, return_tensors=None)['input_ids']
-            output_len = len(output_id_list)
+            # The inference record contains the exact generated-token count.
+            # Decode/re-tokenize can otherwise shift length around special
+            # tokens, which is unacceptable for the 8K/16K rebuttal buckets.
+            output_len = int(item.get('output_len', len(output_id_list)))
             # assert prompt_len == (item['prompt_len'] if 'prompt_len' in item else item['input_len']),\
             #     f"{prompt_len} != {(item['prompt_len'] if 'prompt_len' in item else item['input_len'])}"
             # print(output_len, [item['output_len'], prompt_len, item['output_len'] + prompt_len])
             # assert output_len in [item['output_len'], item['output_len'] + prompt_len], \
             #     f"{output_len} in {[item['output_len'], item['output_len'] + prompt_len]}"
 
-            if self.args.method in CLASS_CACHE:
+            if 'peak_kv_tokens' in item:
+                metrics['peak_mem_list'].append(item['peak_kv_tokens'])
+            elif self.args.method in CLASS_CACHE:
                 metrics['peak_mem_list'].append(self.args.cache_size)
             elif self.args.method in (CLASS_ANCHOR + CLASS_TOKEN):
                 if 'max_token' not in item:
@@ -343,6 +380,9 @@ class Evaluator:
             metrics['prompt_len_list'].append(prompt_len)
             metrics['output_len_list'].append(output_len)
             metrics['total_len_list'].append(output_len+prompt_len)
+            metrics['over_8k'] += int(output_len > 8 * 1024)
+            metrics['over_16k'] += int(output_len > 16 * 1024)
+            metrics['hit_max'] += int(item.get('hit_max_new_tokens', False))
 
             # 3. Attend (i.e., dependency)
             attend, frequency = self._cal_attend(
@@ -357,6 +397,8 @@ class Evaluator:
 
             # 4. Infer_time
             metrics['infer_time_list'].append(item['infer_time'])
+            metrics['peak_gpu_allocated_gib_list'].append(item.get('peak_gpu_allocated_gib', 0.0))
+            metrics['peak_gpu_reserved_gib_list'].append(item.get('peak_gpu_reserved_gib', 0.0))
 
             # 5. Compress Cnt
             if self.args.method in CLASS_ANCHOR:

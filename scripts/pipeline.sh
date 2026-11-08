@@ -280,7 +280,13 @@ run_infer() {
     # 若指定了可用的 --infer_model_path，则直接用于推理（无需训练目录）
     if [[ -n "${INFER_MODEL_PATH}" ]] && [[ -e "${INFER_MODEL_PATH}" ]]; then
         infer_model_path="${INFER_MODEL_PATH}"
-        resolved_ckpt="-1"
+        local checkpoint_basename
+        checkpoint_basename="$(basename "${infer_model_path}")"
+        if [[ "${checkpoint_basename}" =~ ^checkpoint-([0-9]+)$ ]]; then
+            resolved_ckpt="${BASH_REMATCH[1]}"
+        else
+            resolved_ckpt="-1"
+        fi
         tokenizer_path_infer="${TOKENIZER_PATH:-${INFER_MODEL_PATH}}"
         log "使用指定模型路径进行推理: ${infer_model_path}"
     else
@@ -294,10 +300,8 @@ run_infer() {
     local output_tag="${EXP_ROOT}/inference"
     local model_short_tag="${EXP_TAG}"
 
-    mkdir -p "${output_tag}/inference_log/false_false"
-    mkdir -p "${output_tag}/inference_log/false_true"
-    mkdir -p "${output_tag}/inference_log/true_false"
-    mkdir -p "${output_tag}/inference_log/true_true"
+    local infer_mode_dir="${USE_EPL}_${SPEC_DECODE}"
+    mkdir -p "${output_tag}/inference_log/${infer_mode_dir}"
 
     local gpu_arr=()
     csv_to_array "${TARGET_GPUS}" gpu_arr
@@ -356,7 +360,7 @@ run_infer() {
                 --rkv_retain_direction "${RKV_RETAIN_DIRECTION}" \
                 --rkv_similarity_threshold "${RKV_SIMILARITY_THRESHOLD}" \
                 --datasets "${ds_arr[@]}" \
-                > "${output_tag}/inference_log/false_false/${real_index}_${model_short_tag}_${resolved_ckpt}.txt" 2>&1 &
+                > "${output_tag}/inference_log/${infer_mode_dir}/${real_index}_${model_short_tag}_${resolved_ckpt}.txt" 2>&1 &
             pids+=("$!")
             sleep 2
         done
@@ -384,6 +388,15 @@ run_eval() {
     csv_to_array "${DATASETS}" ds_arr
     [[ "${#ds_arr[@]}" -gt 0 ]] || die "--datasets 不能为空"
 
+    # Evaluate exactly the shards produced by the current GPU/process layout.
+    # A broad glob can silently include stale shards from an older 4/8/32-way
+    # run and double-count benchmark examples.
+    local eval_gpu_arr=()
+    csv_to_array "${TARGET_GPUS}" eval_gpu_arr
+    [[ "${#eval_gpu_arr[@]}" -gt 0 ]] || die "--target_gpus 不能为空"
+    [[ "${PROCESS_PER_GPU}" -gt 0 ]] || die "--process_per_gpu 必须 > 0"
+    local eval_split_size=$(( ${#eval_gpu_arr[@]} * PROCESS_PER_GPU ))
+
     local missing_reference="false"
     for ds in "${ds_arr[@]}"; do
         if [[ ! -f "${ROOT_DIR}/data/eval/${ds}.jsonl" ]]; then
@@ -404,10 +417,13 @@ run_eval() {
     for ds in "${ds_arr[@]}"; do
         local base_path="${infer_base}/${ds}"
         [[ -d "${base_path}" ]] || die "推理结果目录不存在: ${base_path}"
-        shopt -s nullglob
-        local files=( "${base_path}"/*.jsonl )
-        shopt -u nullglob
-        [[ "${#files[@]}" -gt 0 ]] || die "未找到评估文件: ${base_path}/*.jsonl"
+        local files=()
+        local shard_idx
+        for ((shard_idx=1; shard_idx<=eval_split_size; shard_idx++)); do
+            local shard_file="${base_path}/${shard_idx}_${ds}.jsonl"
+            [[ -f "${shard_file}" ]] || die "Missing current-run shard: ${shard_file}"
+            files+=("${shard_file}")
+        done
 
         local eval_result_dir="${EXP_ROOT}/eval/${EVAL_METHOD}/${MODEL_TYPE}/${ds}"
         mkdir -p "${eval_result_dir}"

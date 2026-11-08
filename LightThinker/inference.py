@@ -1,5 +1,6 @@
 
 import os
+import hashlib
 import time
 import torch
 import argparse
@@ -2280,6 +2281,14 @@ def generate(
             )
             
     
+    # Every method must obey the same exact output-token ceiling.  The legacy
+    # decode loops append one next-token prediction after exiting, and MTP can
+    # commit a short multi-token block across the boundary, so trim centrally.
+    if len(token_utils.show_output_input_ids) > max_new_tokens:
+        del token_utils.show_output_input_ids[max_new_tokens:]
+        prompt = tokenizer.decode(token_utils.show_prompt_input_ids)
+        output = tokenizer.decode(token_utils.show_output_input_ids)
+
     del kv_utils
     return prompt, output
 
@@ -2443,6 +2452,7 @@ def eval_dataset(
     mtp_draft_len:int=None,
     profile_breakdown:bool=False,
     rkv_config:RKVConfig=None,
+    run_signature:Dict=None,
 ):
 
     if split_size != None and index != None:
@@ -2473,16 +2483,50 @@ def eval_dataset(
             pass
 
     # ===== CONTINUE =====
+    shard_start = start
+    shard_end = end
     data_copy_list = list()
     _id_list = list()
     if os.path.isfile(output_file):
-        with jsonlines.open(output_file, 'r') as f:
-            for item in f:
-                _id_list.append(item['idx'])
-                data_copy_list.append(item)
+        try:
+            with jsonlines.open(output_file, 'r') as f:
+                for item in f:
+                    _id_list.append(item['idx'])
+                    data_copy_list.append(item)
+        except Exception as exc:
+            print(f"Ignoring unreadable partial shard {output_file}: {exc}")
+            _id_list.clear()
+            data_copy_list.clear()
         if len(_id_list) != 0:
-            assert _id_list[0] == start
-            start = _id_list[-1] + 1
+            expected_ids = list(range(shard_start, shard_end))
+            valid_prefix = _id_list == expected_ids[:len(_id_list)]
+            valid_length = len(_id_list) <= len(expected_ids)
+            valid_cap = all(
+                item.get('max_new_tokens') == max_new_tokens
+                for item in data_copy_list
+            )
+            valid_signature = all(
+                item.get('run_signature') == run_signature
+                for item in data_copy_list
+            )
+            valid_rkv = True
+            if rkv_config is not None:
+                valid_rkv = all(
+                    item.get('rkv_stats', {}).get('budget') == rkv_config.budget
+                    and item.get('rkv_stats', {}).get('buffer_size') == rkv_config.buffer_size
+                    and item.get('rkv_stats', {}).get('window_size') == rkv_config.window_size
+                    for item in data_copy_list
+                )
+            if valid_prefix and valid_length and valid_cap and valid_signature and valid_rkv:
+                start = _id_list[-1] + 1
+            else:
+                print(
+                    f"Ignoring stale/incompatible shard {output_file}: "
+                    f"ids={_id_list}, expected={expected_ids}, max_new_tokens={max_new_tokens}"
+                )
+                data_copy_list.clear()
+                _id_list.clear()
+                start = shard_start
     # ====================
 
     total = 0
@@ -2534,6 +2578,10 @@ def eval_dataset(
 
             sample_stats = MTPStats(profile=profile_breakdown) if spec_decode else None
             sample_rkv_stats = {} if rkv_config is not None else None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                torch.cuda.reset_peak_memory_stats()
             start_time = time.time()
             prompt, output = generate(
                 question=question,
@@ -2561,7 +2609,17 @@ def eval_dataset(
                 rkv_config=rkv_config,
                 rkv_stats=sample_rkv_stats,
             )
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
             end_time = time.time()
+            peak_gpu_allocated_gib = (
+                torch.cuda.max_memory_allocated() / (1024 ** 3)
+                if torch.cuda.is_available() else 0.0
+            )
+            peak_gpu_reserved_gib = (
+                torch.cuda.max_memory_reserved() / (1024 ** 3)
+                if torch.cuda.is_available() else 0.0
+            )
             input_len:int = len(token_utils.show_prompt_input_ids)
             output_len:int = len(token_utils.show_output_input_ids)
             
@@ -2583,8 +2641,11 @@ def eval_dataset(
                 max_new_tokens=max_new_tokens,
                 hit_max_new_tokens=output_len >= max_new_tokens,
                 infer_time=end_time-start_time,
+                peak_gpu_allocated_gib=peak_gpu_allocated_gib,
+                peak_gpu_reserved_gib=peak_gpu_reserved_gib,
                 comp_pattern=comp_pattern,
-                max_token=token_utils.max_token
+                max_token=token_utils.max_token,
+                run_signature=run_signature,
             )
             if sample_stats is not None:
                 record["mtp_draft_len"] = (
@@ -2642,6 +2703,42 @@ def main():
         print(f'R-KV config: {rkv_config}')
 
     comp_config = Config.from_file(args.compress_config)
+    with open(args.compress_config, 'rb') as config_file:
+        compress_config_sha256 = hashlib.sha256(config_file.read()).hexdigest()
+    run_signature = dict(
+        schema_version='long_math_v2',
+        model_path=os.path.realpath(args.model_path) if args.model_path else None,
+        tokenizer_path=os.path.realpath(args.tokenizer_path) if args.tokenizer_path else None,
+        compress_config=os.path.realpath(args.compress_config),
+        compress_config_sha256=compress_config_sha256,
+        max_new_tokens=args.max_new_tokens,
+        repetition_penalty=args.repetition_penalty,
+        bos_token=args.bos_token,
+        eos_token=args.eos_token,
+        rolling_rope=args.rolling_rope,
+        diagonal=args.diagonal,
+        bi_directional=args.bi_directional,
+        see_current=args.see_current,
+        exclude_continue=args.exclude_continue,
+        prefill_compress=args.prefill_compress,
+        compress_prompt=args.compress_prompt,
+        update_attention_method=args.update_attention_method,
+        output_compress_instruction=args.output_compress_instruction,
+        split_size=args.split_size,
+        use_EPL=args.use_EPL,
+        spec_decode=args.spec_decode,
+        mtp_draft_len=args.mtp_draft_len,
+        vanilla=args.vanilla,
+        rkv=args.rkv,
+        rkv_budget=args.rkv_budget if args.rkv else None,
+        rkv_buffer_size=args.rkv_buffer_size if args.rkv else None,
+        rkv_window_size=args.rkv_window_size if args.rkv else None,
+        rkv_kernel_size=args.rkv_kernel_size if args.rkv else None,
+        rkv_mix_lambda=args.rkv_mix_lambda if args.rkv else None,
+        rkv_retain_ratio=args.rkv_retain_ratio if args.rkv else None,
+        rkv_retain_direction=args.rkv_retain_direction if args.rkv else None,
+        rkv_similarity_threshold=args.rkv_similarity_threshold if args.rkv else None,
+    )
     attention_config = dict(
         diagonal=args.diagonal,
         bi_attention=args.bi_directional,
@@ -2702,6 +2799,7 @@ def main():
             mtp_draft_len=args.mtp_draft_len,
             profile_breakdown=args.profile_breakdown,
             rkv_config=rkv_config,
+            run_signature=run_signature,
         )
 
 if __name__ == '__main__':

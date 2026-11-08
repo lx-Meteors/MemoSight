@@ -81,6 +81,7 @@ if [[ -n "${MEMOSIGHT_ENV_BIN}" ]]; then
 fi
 
 cd "${PROJECT_ROOT}"
+export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 mkdir -p "${LOG_DIR}" "${OUTPUT_BASE_DIR}"
 exec > >(tee -a "${RUN_LOG}") 2>&1
 
@@ -92,6 +93,47 @@ die() {
 require_file() {
     local path="$1"
     [[ -f "${path}" ]] || die "File not found: ${path}"
+}
+
+require_dir() {
+    local path="$1"
+    [[ -d "${path}" ]] || die "Directory not found: ${path}"
+}
+
+require_bool() {
+    local name="$1"
+    local value="${2,,}"
+    [[ "${value}" == "true" || "${value}" == "false" ]] \
+        || die "${name} must be true or false (got: $2)"
+}
+
+validate_checkpoint() {
+    local path="$1"
+    local display_name="$2"
+    local weight_files=()
+    [[ -d "${path}" ]] || die "${display_name} checkpoint does not exist: ${path}"
+    [[ -f "${path}/config.json" ]] || die "${display_name} checkpoint has no config.json: ${path}"
+    shopt -s nullglob
+    weight_files=(
+        "${path}"/model*.safetensors
+        "${path}"/pytorch_model*.bin
+        "${path}"/adapter_model*.safetensors
+        "${path}"/adapter_model*.bin
+    )
+    shopt -u nullglob
+    [[ "${#weight_files[@]}" -gt 0 ]] || die "${display_name} checkpoint has no model weights: ${path}"
+}
+
+validate_eval_dataset() {
+    local name="$1"
+    local json_path="${PROJECT_ROOT}/data/eval/${name}.json"
+    local jsonl_path="${PROJECT_ROOT}/data/eval/${name}.jsonl"
+    require_file "${json_path}"
+    require_file "${jsonl_path}"
+    python -c \
+        'import json,sys; a=json.load(open(sys.argv[1], encoding="utf-8")); n=sum(len(v) for v in a.values()) if isinstance(a,dict) else len(a); rows=[json.loads(x) for x in open(sys.argv[2], encoding="utf-8") if x.strip()]; assert n==30 and len(rows)==30 and sorted(int(x["idx"]) for x in rows)==list(range(30)), (n,len(rows))' \
+        "${json_path}" "${jsonl_path}" \
+        || die "${name} must contain 30 examples in both JSON and JSONL"
 }
 
 latest_checkpoint() {
@@ -203,24 +245,90 @@ train_vanilla() {
 }
 
 require_file "${PIPELINE_SCRIPT}"
-require_file "${TRAIN_DATA_PATH}"
-require_file "${PROJECT_ROOT}/data/eval/aime_2026.json"
-require_file "${PROJECT_ROOT}/data/eval/aime_2026.jsonl"
-require_file "${PROJECT_ROOT}/data/eval/hmmt_feb_2025.json"
-require_file "${PROJECT_ROOT}/data/eval/hmmt_feb_2025.jsonl"
 require_file "${LIGHTTHINKER_CONFIG}"
 require_file "${MEMOSIGHT_CONFIG}"
 require_file "${VANILLA_CONFIG}"
+require_dir "${TOKENIZER_PATH}"
+require_bool "TRAIN_VANILLA" "${TRAIN_VANILLA}"
+require_bool "RUN_RKV" "${RUN_RKV}"
+
+[[ "${MAX_NEW_TOKENS}" =~ ^[0-9]+$ ]] || die "MAX_NEW_TOKENS must be an integer"
+[[ "${MAX_NEW_TOKENS}" -eq 24576 ]] || die "Rebuttal workflow requires MAX_NEW_TOKENS=24576"
+[[ "${PROCESS_PER_GPU}" =~ ^[0-9]+$ ]] || die "PROCESS_PER_GPU must be an integer"
+[[ "${PROCESS_PER_GPU}" -eq 4 ]] || die "Rebuttal workflow requires PROCESS_PER_GPU=4 (16 total workers)"
+[[ "${TARGET_GPUS}" == "4,5,6,7" ]] || die "Rebuttal workflow requires TARGET_GPUS=4,5,6,7"
+[[ "${EVAL_DATASETS}" == "aime_2026,hmmt_feb_2025" ]] \
+    || die "Rebuttal workflow requires EVAL_DATASETS=aime_2026,hmmt_feb_2025"
 
 command -v python >/dev/null 2>&1 || die "python is not available; activate the MemoSight environment first"
-command -v deepspeed >/dev/null 2>&1 || die "deepspeed is not available; activate the MemoSight environment first"
 command -v flock >/dev/null 2>&1 || die "flock is required to prevent duplicate runs"
-
 exec 9>"${LOCK_FILE}"
 flock -n 9 || die "Another rebuttal long-math workflow is already running"
 
+python -c 'import sys; assert float(sys.argv[1]) > 0' "${REPETITION_PENALTY}" \
+    || die "REPETITION_PENALTY must be a positive number"
+
+validate_eval_dataset "aime_2026"
+validate_eval_dataset "hmmt_feb_2025"
+
+if [[ "${RUN_RKV,,}" == "true" ]]; then
+    [[ "${RKV_RETAIN_DIRECTION}" == "last" || "${RKV_RETAIN_DIRECTION}" == "first" ]] \
+        || die "RKV_RETAIN_DIRECTION must be last or first"
+    python -c \
+        'import sys; b,buf,w,k=int(sys.argv[1]),int(sys.argv[2]),int(sys.argv[3]),int(sys.argv[4]); lam,ratio,thr=map(float,sys.argv[5:8]); assert b>w>0 and buf>0 and k>0 and k%2==1 and 0<=lam<=1 and 0<ratio<=1 and -1<=thr<=1' \
+        "${RKV_BUDGET}" "${RKV_BUFFER_SIZE}" "${RKV_WINDOW_SIZE}" "${RKV_KERNEL_SIZE}" \
+        "${RKV_MIX_LAMBDA}" "${RKV_RETAIN_RATIO}" "${RKV_SIMILARITY_THRESHOLD}" \
+        || die "Invalid R-KV configuration"
+fi
+
+python -c 'import torch; assert torch.cuda.is_available(); print(f"[PREFLIGHT] torch={torch.__version__}, cuda={torch.version.cuda}, visible_gpus={torch.cuda.device_count()}")' \
+    || die "PyTorch/CUDA preflight failed"
+python "${PROJECT_ROOT}/LightThinker/inference.py" --help >/dev/null \
+    || die "Inference imports/CLI preflight failed"
+python "${PROJECT_ROOT}/evaluation/eval_file.py" --help >/dev/null \
+    || die "Evaluation imports/CLI preflight failed"
+
+old_ifs="${IFS}"
+IFS=',' read -r -a preflight_gpus <<< "${TARGET_GPUS}"
+IFS="${old_ifs}"
+for gpu in "${preflight_gpus[@]}"; do
+    GPU_LABEL="${gpu}" CUDA_VISIBLE_DEVICES="${gpu}" python -c \
+        'import os,torch; assert torch.cuda.is_available() and torch.cuda.device_count()==1; print("[PREFLIGHT] physical_gpu={}, device={}".format(os.environ["GPU_LABEL"], torch.cuda.get_device_name(0)))' \
+        || die "GPU ${gpu} is not available to PyTorch"
+done
+
+if [[ "${TRAIN_VANILLA,,}" == "true" ]]; then
+    [[ "${TRAIN_GPUS}" == "4,5,6,7" ]] || die "Vanilla training requires TRAIN_GPUS=4,5,6,7"
+    python -c \
+        'import sys; ml,ep,mb,ga=int(sys.argv[1]),int(sys.argv[2]),int(sys.argv[3]),int(sys.argv[4]); lr,wr=float(sys.argv[5]),float(sys.argv[6]); assert ml==4096 and ep>0 and mb==1 and ga==16 and lr>0 and 0<=wr<1' \
+        "${MAX_LENGTH}" "${EPOCHS}" "${MICRO_BATCH_SIZE}" "${GRADIENT_ACCUMULATION_STEPS}" \
+        "${VANILLA_LR}" "${WARMUP_RATIO}" \
+        || die "Invalid Vanilla training configuration (expected max_length=4096, micro_batch=1, grad_accumulation=16)"
+    validate_checkpoint "${BASE_MODEL_PATH}" "Vanilla base model"
+    require_file "${TRAIN_DATA_PATH}"
+    python -c \
+        'import json,sys; f=open(sys.argv[1], encoding="utf-8"); n=sum(json.loads(line) is not None for line in f if line.strip()); assert n>0' \
+        "${TRAIN_DATA_PATH}" \
+        || die "Training data is empty or invalid JSONL: ${TRAIN_DATA_PATH}"
+    if [[ "${DEEPSPEED_CONFIG}" == /* ]]; then
+        require_file "${DEEPSPEED_CONFIG}"
+    else
+        require_file "${PROJECT_ROOT}/${DEEPSPEED_CONFIG}"
+    fi
+    command -v deepspeed >/dev/null 2>&1 || die "deepspeed is not available; activate the MemoSight environment first"
+    python "${PROJECT_ROOT}/LightThinker/train.py" --help >/dev/null \
+        || die "Training imports/CLI preflight failed"
+fi
+
 LIGHTTHINKER_CKPT="$(latest_checkpoint "${LIGHTTHINKER_CKPT_PATH}" "${LIGHTTHINKER_EXP_TAG}" "LightThinker")"
 MEMOSIGHT_CKPT="$(latest_checkpoint "${MEMOSIGHT_CKPT_PATH}" "${MEMOSIGHT_EXP_TAG}" "MemoSight")"
+validate_checkpoint "${LIGHTTHINKER_CKPT}" "LightThinker"
+validate_checkpoint "${MEMOSIGHT_CKPT}" "MemoSight"
+VANILLA_CKPT=""
+if [[ "${TRAIN_VANILLA,,}" == "false" ]]; then
+    VANILLA_CKPT="$(latest_checkpoint "${VANILLA_CKPT_PATH}" "${VANILLA_EXP_TAG}" "Vanilla")"
+    validate_checkpoint "${VANILLA_CKPT}" "Vanilla"
+fi
 
 echo "================================================================"
 echo "Rebuttal long-math workflow"
@@ -242,9 +350,10 @@ run_inference "MemoSight" "${MEMOSIGHT_EXP_TAG}" "${MEMOSIGHT_CKPT}" "${MEMOSIGH
 
 if [[ "${TRAIN_VANILLA,,}" == "true" ]]; then
     train_vanilla
+    VANILLA_CKPT="$(latest_checkpoint "${VANILLA_CKPT_PATH}" "${VANILLA_EXP_TAG}" "Vanilla")"
+    validate_checkpoint "${VANILLA_CKPT}" "Vanilla"
 fi
 
-VANILLA_CKPT="$(latest_checkpoint "${VANILLA_CKPT_PATH}" "${VANILLA_EXP_TAG}" "Vanilla")"
 run_inference "Vanilla" "${VANILLA_EXP_TAG}" "${VANILLA_CKPT}" "${VANILLA_CONFIG}" false false true normal false
 
 if [[ "${RUN_RKV,,}" == "true" ]]; then
