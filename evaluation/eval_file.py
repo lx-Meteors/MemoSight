@@ -383,7 +383,11 @@ def get_parser():
     parser.add_argument('--comp_config', type=str)
 
     parser.add_argument('--model_type', type=str, choices=['llama', 'qwen'])
-    parser.add_argument('--dataset', type=str, choices=['bbh', 'gsm8k', 'gpqa', 'mmlu'])
+    parser.add_argument(
+        '--dataset',
+        type=str,
+        choices=['bbh', 'gsm8k', 'gpqa', 'mmlu', 'aime_2026', 'hmmt_feb_2025'],
+    )
     parser.add_argument('--model_tag', type=str, default='', help='Model tag to distinguish different models')
     parser.add_argument('--files', nargs='+', help='List of files')
     parser.add_argument('--interaction', action="store_true")
