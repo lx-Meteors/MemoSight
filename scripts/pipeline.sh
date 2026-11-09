@@ -89,6 +89,7 @@ print_help() {
   --tokenizer_path           tokenizer 路径
   --train_model_path         训练初始化 base model 路径
   --train_data_path          训练数据路径
+  --resume_from_checkpoint  显式指定 Trainer checkpoint 目录继续训练
   --conf_version             压缩配置版本（默认 v1）
   --train_gpus               训练卡号，逗号分隔（默认 0,1,2,3,4,5,6,7）
   --max_length               默认 4096
@@ -184,6 +185,7 @@ save_param_snapshot() {
         echo "infer_model_path=${INFER_MODEL_PATH}"
         echo "legacy_model_path=${MODEL_PATH}"
         echo "train_data_path=${TRAIN_DATA_PATH}"
+        echo "resume_from_checkpoint=${RESUME_FROM_CHECKPOINT}"
         echo "save_strategy=${SAVE_STRATEGY}"
         echo "save_steps=${SAVE_STEPS}"
         echo "model_type=${MODEL_TYPE}"
@@ -229,6 +231,13 @@ run_train() {
     local ds_cfg
     ds_cfg="$(to_abs_path "${DEEPSPEED_CONFIG}")"
     require_file "${ds_cfg}"
+    local resume_args=()
+    if [[ -n "${RESUME_FROM_CHECKPOINT}" ]]; then
+        [[ -d "${RESUME_FROM_CHECKPOINT}" ]] \
+            || die "resume checkpoint directory does not exist: ${RESUME_FROM_CHECKPOINT}"
+        resume_args=(--resume_from_checkpoint "${RESUME_FROM_CHECKPOINT}")
+        log "Explicitly resuming training from: ${RESUME_FROM_CHECKPOINT}"
+    fi
 
     log "开始训练..."
     deepspeed --master_port=54212 --include "localhost:${TRAIN_GPUS}" "${train_py}" \
@@ -263,7 +272,8 @@ run_train() {
         --prefill_compress "${PREFILL_COMPRESS}" \
         --lr_scheduler_type "${LR_SCHEDULER_TYPE}" \
         --use_EPL "${USE_EPL}" \
-        --seed "${SEED}" 2>&1 | tee "${log_file}"
+        --seed "${SEED}" \
+        "${resume_args[@]}" 2>&1 | tee "${log_file}"
     local exit_code=${PIPESTATUS[0]}
     link_latest "${log_file}" "train_latest.log"
     [[ "${exit_code}" -eq 0 ]] || die "训练失败，日志: ${log_file}"
@@ -471,6 +481,7 @@ TRAIN_MODEL_PATH=""
 INFER_MODEL_PATH=""
 MODEL_PATH=""
 TRAIN_DATA_PATH=""
+RESUME_FROM_CHECKPOINT=""
 CONF_VERSION="v1"
 TRAIN_GPUS="0,1,2,3,4,5,6,7"
 MAX_LENGTH=4096
@@ -543,6 +554,7 @@ while [[ $# -gt 0 ]]; do
         --infer_model_path) INFER_MODEL_PATH="${2:-}"; shift 2 ;;
         --model_path) MODEL_PATH="${2:-}"; shift 2 ;;
         --train_data_path) TRAIN_DATA_PATH="${2:-}"; shift 2 ;;
+        --resume_from_checkpoint) RESUME_FROM_CHECKPOINT="${2:-}"; shift 2 ;;
         --conf_version) CONF_VERSION="${2:-}"; shift 2 ;;
         --train_gpus) TRAIN_GPUS="${2:-}"; shift 2 ;;
         --max_length) MAX_LENGTH="${2:-}"; shift 2 ;;

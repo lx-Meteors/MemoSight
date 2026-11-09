@@ -214,6 +214,12 @@ def get_parser():
     parser.add_argument('--tokenizer_path', type=str, default=None)
     parser.add_argument('--train_path', type=str, help='training dataset path')
     parser.add_argument('--output_dir', type=str)
+    parser.add_argument(
+        '--resume_from_checkpoint',
+        type=str,
+        default=None,
+        help='Explicit Trainer checkpoint directory. If omitted, resume from the latest checkpoint in output_dir.',
+    )
     parser.add_argument('--max_length', type=int, default=768)
     parser.add_argument('--model_type', type=str, choices=['qwen', 'llama'])
 
@@ -386,8 +392,15 @@ def main():
         args.output_compress_instruction = ""
     print(args)
     
-    resume_from_checkpoint = None
-    if os.path.exists(args.output_dir):
+    resume_from_checkpoint = args.resume_from_checkpoint or None
+    if resume_from_checkpoint is not None:
+        resume_from_checkpoint = os.path.abspath(resume_from_checkpoint)
+        if not os.path.isdir(resume_from_checkpoint):
+            raise FileNotFoundError(
+                f"Explicit resume checkpoint does not exist: {resume_from_checkpoint}"
+            )
+        print(f"Using explicit resume checkpoint: {resume_from_checkpoint}")
+    elif os.path.exists(args.output_dir):
         checkpoints = [d for d in os.listdir(args.output_dir) if d.startswith("checkpoint-")]
         if checkpoints:
             latest_checkpoint = sorted(checkpoints, key=lambda x: int(x.split("-")[-1]))[-1]

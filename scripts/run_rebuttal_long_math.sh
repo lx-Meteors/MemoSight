@@ -25,6 +25,7 @@ MEMOSIGHT_CKPT_PATH="${MEMOSIGHT_CKPT_PATH:-${PROJECT_ROOT}/experiments/qwen3_8b
 # Vanilla is trained by this workflow, so its latest checkpoint is resolved
 # automatically unless an explicit path is supplied.
 VANILLA_CKPT_PATH="${VANILLA_CKPT_PATH:-}"
+VANILLA_RESUME_CHECKPOINT="${VANILLA_RESUME_CHECKPOINT:-}"
 
 # Vanilla training: identical common hyperparameters to the existing launcher.
 TRAIN_GPUS="${TRAIN_GPUS:-4,5,6,7}"
@@ -38,6 +39,8 @@ WARMUP_STEPS="${WARMUP_STEPS:-0}"
 SEED="${SEED:-42}"
 DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-configs/ds_z3_offload_config.json}"
 TRAIN_VANILLA="${TRAIN_VANILLA:-true}"
+RUN_LIGHTTHINKER="${RUN_LIGHTTHINKER:-true}"
+RUN_MEMOSIGHT="${RUN_MEMOSIGHT:-true}"
 
 # Long-CoT inference: four GPUs with four workers each produce 16 shards.
 # Reduce PROCESS_PER_GPU to 2 or 1 if 24K Vanilla KV cache pressure causes OOM.
@@ -228,6 +231,7 @@ train_vanilla() {
         --tokenizer_path "${TOKENIZER_PATH}" \
         --train_model_path "${BASE_MODEL_PATH}" \
         --train_data_path "${TRAIN_DATA_PATH}" \
+        --resume_from_checkpoint "${VANILLA_RESUME_CHECKPOINT}" \
         --use_epl false \
         --mode normal \
         --conf_version v1 \
@@ -251,6 +255,8 @@ require_file "${VANILLA_CONFIG}"
 require_dir "${TOKENIZER_PATH}"
 require_bool "TRAIN_VANILLA" "${TRAIN_VANILLA}"
 require_bool "RUN_RKV" "${RUN_RKV}"
+require_bool "RUN_LIGHTTHINKER" "${RUN_LIGHTTHINKER}"
+require_bool "RUN_MEMOSIGHT" "${RUN_MEMOSIGHT}"
 
 [[ "${MAX_NEW_TOKENS}" =~ ^[0-9]+$ ]] || die "MAX_NEW_TOKENS must be an integer"
 [[ "${MAX_NEW_TOKENS}" -eq 24576 ]] || die "Rebuttal workflow requires MAX_NEW_TOKENS=24576"
@@ -306,6 +312,14 @@ if [[ "${TRAIN_VANILLA,,}" == "true" ]]; then
         || die "Invalid Vanilla training configuration (expected max_length=4096, micro_batch=1, grad_accumulation=16)"
     validate_checkpoint "${BASE_MODEL_PATH}" "Vanilla base model"
     require_file "${TRAIN_DATA_PATH}"
+    if [[ -n "${VANILLA_RESUME_CHECKPOINT}" ]]; then
+        validate_checkpoint "${VANILLA_RESUME_CHECKPOINT}" "Vanilla resume"
+        require_file "${VANILLA_RESUME_CHECKPOINT}/trainer_state.json"
+        expected_vanilla_train_dir="$(cd "${OUTPUT_BASE_DIR}/${VANILLA_EXP_TAG}/train" && pwd -P)"
+        resume_parent_dir="$(cd "$(dirname "${VANILLA_RESUME_CHECKPOINT}")" && pwd -P)"
+        [[ "${resume_parent_dir}" == "${expected_vanilla_train_dir}" ]] \
+            || die "Vanilla resume checkpoint must be inside ${expected_vanilla_train_dir}"
+    fi
     python -c \
         'import json,sys; f=open(sys.argv[1], encoding="utf-8"); n=sum(json.loads(line) is not None for line in f if line.strip()); assert n>0' \
         "${TRAIN_DATA_PATH}" \
@@ -320,10 +334,16 @@ if [[ "${TRAIN_VANILLA,,}" == "true" ]]; then
         || die "Training imports/CLI preflight failed"
 fi
 
-LIGHTTHINKER_CKPT="$(latest_checkpoint "${LIGHTTHINKER_CKPT_PATH}" "${LIGHTTHINKER_EXP_TAG}" "LightThinker")"
-MEMOSIGHT_CKPT="$(latest_checkpoint "${MEMOSIGHT_CKPT_PATH}" "${MEMOSIGHT_EXP_TAG}" "MemoSight")"
-validate_checkpoint "${LIGHTTHINKER_CKPT}" "LightThinker"
-validate_checkpoint "${MEMOSIGHT_CKPT}" "MemoSight"
+LIGHTTHINKER_CKPT=""
+MEMOSIGHT_CKPT=""
+if [[ "${RUN_LIGHTTHINKER,,}" == "true" ]]; then
+    LIGHTTHINKER_CKPT="$(latest_checkpoint "${LIGHTTHINKER_CKPT_PATH}" "${LIGHTTHINKER_EXP_TAG}" "LightThinker")"
+    validate_checkpoint "${LIGHTTHINKER_CKPT}" "LightThinker"
+fi
+if [[ "${RUN_MEMOSIGHT,,}" == "true" ]]; then
+    MEMOSIGHT_CKPT="$(latest_checkpoint "${MEMOSIGHT_CKPT_PATH}" "${MEMOSIGHT_EXP_TAG}" "MemoSight")"
+    validate_checkpoint "${MEMOSIGHT_CKPT}" "MemoSight"
+fi
 VANILLA_CKPT=""
 if [[ "${TRAIN_VANILLA,,}" == "false" ]]; then
     VANILLA_CKPT="$(latest_checkpoint "${VANILLA_CKPT_PATH}" "${VANILLA_EXP_TAG}" "Vanilla")"
@@ -334,9 +354,12 @@ echo "================================================================"
 echo "Rebuttal long-math workflow"
 echo "project_root=${PROJECT_ROOT}"
 echo "base_model=${BASE_MODEL_PATH}"
-echo "lightthinker_checkpoint=${LIGHTTHINKER_CKPT}"
-echo "memosight_checkpoint=${MEMOSIGHT_CKPT}"
+echo "lightthinker_checkpoint=${LIGHTTHINKER_CKPT:-SKIPPED}"
+echo "memosight_checkpoint=${MEMOSIGHT_CKPT:-SKIPPED}"
 echo "train_vanilla=${TRAIN_VANILLA}"
+echo "vanilla_resume_checkpoint=${VANILLA_RESUME_CHECKPOINT:-auto/latest}"
+echo "run_lightthinker=${RUN_LIGHTTHINKER}"
+echo "run_memosight=${RUN_MEMOSIGHT}"
 echo "train_gpus=${TRAIN_GPUS}"
 echo "target_gpus=${TARGET_GPUS}"
 echo "process_per_gpu=${PROCESS_PER_GPU}"
@@ -345,8 +368,12 @@ echo "rkv_budget=${RKV_BUDGET}, rkv_buffer_size=${RKV_BUFFER_SIZE}"
 echo "log=${RUN_LOG}"
 echo "================================================================"
 
-run_inference "LightThinker" "${LIGHTTHINKER_EXP_TAG}" "${LIGHTTHINKER_CKPT}" "${LIGHTTHINKER_CONFIG}" false false false anchor-thought false
-run_inference "MemoSight" "${MEMOSIGHT_EXP_TAG}" "${MEMOSIGHT_CKPT}" "${MEMOSIGHT_CONFIG}" true true false anchor-thought false
+if [[ "${RUN_LIGHTTHINKER,,}" == "true" ]]; then
+    run_inference "LightThinker" "${LIGHTTHINKER_EXP_TAG}" "${LIGHTTHINKER_CKPT}" "${LIGHTTHINKER_CONFIG}" false false false anchor-thought false
+fi
+if [[ "${RUN_MEMOSIGHT,,}" == "true" ]]; then
+    run_inference "MemoSight" "${MEMOSIGHT_EXP_TAG}" "${MEMOSIGHT_CKPT}" "${MEMOSIGHT_CONFIG}" true true false anchor-thought false
+fi
 
 if [[ "${TRAIN_VANILLA,,}" == "true" ]]; then
     train_vanilla
@@ -362,14 +389,14 @@ fi
 
 echo
 echo "================================================================"
-if [[ "${RUN_RKV,,}" == "true" ]]; then
-    echo "[DONE] LightThinker, MemoSight, Vanilla, and R-KV finished on:"
-else
-    echo "[DONE] LightThinker, MemoSight, and Vanilla finished on:"
-fi
+echo "[DONE] Requested rebuttal stages finished on:"
 echo "       aime_2026, hmmt_feb_2025"
-echo "LightThinker results: ${OUTPUT_BASE_DIR}/${LIGHTTHINKER_EXP_TAG}"
-echo "MemoSight results:    ${OUTPUT_BASE_DIR}/${MEMOSIGHT_EXP_TAG}"
+if [[ "${RUN_LIGHTTHINKER,,}" == "true" ]]; then
+    echo "LightThinker results: ${OUTPUT_BASE_DIR}/${LIGHTTHINKER_EXP_TAG}"
+fi
+if [[ "${RUN_MEMOSIGHT,,}" == "true" ]]; then
+    echo "MemoSight results:    ${OUTPUT_BASE_DIR}/${MEMOSIGHT_EXP_TAG}"
+fi
 echo "Vanilla results:      ${OUTPUT_BASE_DIR}/${VANILLA_EXP_TAG}"
 if [[ "${RUN_RKV,,}" == "true" ]]; then
     echo "R-KV results:         ${OUTPUT_BASE_DIR}/${RKV_EXP_TAG}"
