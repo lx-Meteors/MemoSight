@@ -207,6 +207,35 @@ def set_global_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
     hf_set_seed(seed)
 
+
+def train_from_trusted_local_checkpoint(trainer: Trainer, checkpoint: str) -> None:
+    """Resume while allowing only the local RNG-state pickle to load fully.
+
+    Transformers requests ``weights_only=True`` for ``rng_state*.pth``.  RNG
+    checkpoints contain NumPy objects rather than model tensors, so PyTorch
+    2.5 can reject checkpoints written by another NumPy version.  This
+    checkpoint is produced by this training job and is validated by the
+    launcher.  Keep the compatibility fallback strictly limited to RNG files;
+    every model/optimizer load retains its original behavior.
+    """
+    original_torch_load = torch.load
+
+    def trusted_rng_load(file_obj, *args, **kwargs):
+        try:
+            file_name = os.path.basename(os.fspath(file_obj))
+        except TypeError:
+            file_name = ""
+        if file_name.startswith("rng_state") and kwargs.get("weights_only") is True:
+            kwargs["weights_only"] = False
+            print(f"Loading trusted local RNG state with weights_only=False: {file_obj}")
+        return original_torch_load(file_obj, *args, **kwargs)
+
+    torch.load = trusted_rng_load
+    try:
+        trainer.train(resume_from_checkpoint=checkpoint)
+    finally:
+        torch.load = original_torch_load
+
 def get_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument('--local_rank', type=int, help="just used for deepspeed.")
@@ -482,7 +511,7 @@ def main():
 
     try:
         if resume_from_checkpoint:
-            trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+            train_from_trusted_local_checkpoint(trainer, resume_from_checkpoint)
         else:
             trainer.train()
     finally:
