@@ -110,6 +110,39 @@ require_bool() {
         || die "${name} must be true or false (got: $2)"
 }
 
+configure_torch_cuda_libraries() {
+    # PyTorch cu124 wheels install libcusparse and libnvJitLink under the
+    # active Python environment.  Some clusters prepend an older system CUDA
+    # directory to LD_LIBRARY_PATH, causing libcusparse.so.12 to resolve an
+    # incompatible libnvJitLink.so.12.  Prefer the matching wheel library.
+    local nvjitlink_lib_dir=""
+    nvjitlink_lib_dir="$(python -c '
+import pathlib
+import site
+
+bases = list(site.getsitepackages())
+user_site = site.getusersitepackages()
+if isinstance(user_site, str):
+    bases.append(user_site)
+for base in bases:
+    candidate = pathlib.Path(base) / "nvidia" / "nvjitlink" / "lib"
+    if (candidate / "libnvJitLink.so.12").is_file():
+        print(candidate)
+        break
+')"
+
+    if [[ -n "${nvjitlink_lib_dir}" ]]; then
+        case ":${LD_LIBRARY_PATH:-}:" in
+            *":${nvjitlink_lib_dir}:"*) ;;
+            *) export LD_LIBRARY_PATH="${nvjitlink_lib_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" ;;
+        esac
+        echo "[PREFLIGHT] python=$(command -v python)"
+        echo "[PREFLIGHT] prioritized nvJitLink=${nvjitlink_lib_dir}/libnvJitLink.so.12"
+    else
+        echo "[PREFLIGHT] No Python-wheel libnvJitLink.so.12 found; using the system loader configuration"
+    fi
+}
+
 validate_checkpoint() {
     local path="$1"
     local display_name="$2"
@@ -268,6 +301,7 @@ require_bool "RUN_MEMOSIGHT" "${RUN_MEMOSIGHT}"
 
 command -v python >/dev/null 2>&1 || die "python is not available; activate the MemoSight environment first"
 command -v flock >/dev/null 2>&1 || die "flock is required to prevent duplicate runs"
+configure_torch_cuda_libraries
 exec 9>"${LOCK_FILE}"
 flock -n 9 || die "Another rebuttal long-math workflow is already running"
 
