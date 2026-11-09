@@ -42,9 +42,8 @@ TRAIN_VANILLA="${TRAIN_VANILLA:-true}"
 RUN_LIGHTTHINKER="${RUN_LIGHTTHINKER:-true}"
 RUN_MEMOSIGHT="${RUN_MEMOSIGHT:-true}"
 
-# Long-CoT inference: four GPUs with four workers each produce 16 shards.
-# Reduce PROCESS_PER_GPU to 2 or 1 if 24K Vanilla KV cache pressure causes OOM.
-TARGET_GPUS="${TARGET_GPUS:-4,5,6,7}"
+# Long-CoT inference: eight GPUs with four workers each produce 32 shards.
+TARGET_GPUS="${TARGET_GPUS:-0,1,2,3,4,5,6,7}"
 PROCESS_PER_GPU="${PROCESS_PER_GPU:-4}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-24576}"
 REPETITION_PENALTY="${REPETITION_PENALTY:-1.1}"
@@ -294,8 +293,9 @@ require_bool "RUN_MEMOSIGHT" "${RUN_MEMOSIGHT}"
 [[ "${MAX_NEW_TOKENS}" =~ ^[0-9]+$ ]] || die "MAX_NEW_TOKENS must be an integer"
 [[ "${MAX_NEW_TOKENS}" -eq 24576 ]] || die "Rebuttal workflow requires MAX_NEW_TOKENS=24576"
 [[ "${PROCESS_PER_GPU}" =~ ^[0-9]+$ ]] || die "PROCESS_PER_GPU must be an integer"
-[[ "${PROCESS_PER_GPU}" -eq 4 ]] || die "Rebuttal workflow requires PROCESS_PER_GPU=4 (16 total workers)"
-[[ "${TARGET_GPUS}" == "4,5,6,7" ]] || die "Rebuttal workflow requires TARGET_GPUS=4,5,6,7"
+[[ "${PROCESS_PER_GPU}" -eq 4 ]] || die "Rebuttal workflow requires PROCESS_PER_GPU=4 (32 total workers)"
+[[ "${TARGET_GPUS}" == "0,1,2,3,4,5,6,7" ]] \
+    || die "Rebuttal workflow requires TARGET_GPUS=0,1,2,3,4,5,6,7"
 [[ "${EVAL_DATASETS}" == "aime_2026,hmmt_feb_2025" ]] \
     || die "Rebuttal workflow requires EVAL_DATASETS=aime_2026,hmmt_feb_2025"
 
