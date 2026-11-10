@@ -34,15 +34,14 @@ bash scripts/run_breadcrumbs_long_math.sh
 bash scripts/run_lightthinker_medusa_long_math.sh
 ```
 
-Run the revised Task 2 and Task 3 together (Breadcrumbs `c=5`, Medusa
-`d=2`/two future-token heads), followed by the Reviewer H4W6 static-batch
-matrix:
+Run the Reviewer H4W6 static-batch matrix first, then the revised Task 2 and
+Task 3 together (Breadcrumbs `c=5`, Medusa `d=2`/two future-token heads):
 
 ```bash
 bash scripts/run_breadcrumbs_c5_medusa_d2_long_math.sh
 ```
 
-The appended batch task measures Vanilla AR, MemoSight AR, and MemoSight SD at
+The first batch task measures Vanilla AR, MemoSight AR, and MemoSight SD at
 batch 4/16/64 with three repeats on a fixed seed-42 GSM8K performance subset.
 It records exact output IDs, aggregate throughput, accuracy, completion times,
 allocated/reserved memory, valid/physical KV occupancy, and SD acceptance.

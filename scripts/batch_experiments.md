@@ -15,7 +15,7 @@ Run only the batch matrix:
 bash scripts/run_h4w6_batch_experiments.sh
 ```
 
-It is also appended automatically after the revised Task 2/Task 3 workflow:
+It also runs automatically before the revised Task 2/Task 3 workflow:
 
 ```bash
 bash scripts/run_breadcrumbs_c5_medusa_d2_long_math.sh
