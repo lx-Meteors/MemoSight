@@ -131,6 +131,68 @@ class Tokenizer:
 
         return final_item
 
+    def foresight_mtp_data_tokenize(
+        self,
+        structured_input:List[str],
+        max_length:int,
+        register_token_id:int,
+        max_offset:int,
+        train_on_input:bool=False,
+    ) -> Dict:
+        """Build the compression-free foresight-MTP training sequence.
+
+        The prompt stays untouched.  In the assistant response every semantic
+        token is preceded by a register token, matching MemoSight's foresight
+        supervision while removing all compression/EPL machinery.  One offset
+        is sampled per example, exactly as in the original MemoSight data path.
+        """
+        if len(structured_input) != 2:
+            raise ValueError("foresight MTP expects [prompt, assistant] input")
+        if max_offset < 0:
+            raise ValueError("max_offset must be non-negative")
+
+        prompt_ids = self.tokenizer(
+            structured_input[0], return_tensors=None, add_special_tokens=False
+        )["input_ids"]
+        answer_ids = self.tokenizer(
+            structured_input[1], return_tensors=None, add_special_tokens=False
+        )["input_ids"]
+        # Match MemoSight's truncation convention: max_length counts semantic
+        # prompt/answer tokens, not the temporary register tokens inserted for
+        # foresight supervision.  The physical sequence may therefore be
+        # longer than max_length, exactly like the MemoSight MTP data path.
+        prompt_ids = prompt_ids[:max_length]
+        answer_ids = answer_ids[: max(max_length - len(prompt_ids), 0)]
+        offset = random.randint(0, max_offset)
+
+        input_ids = list(prompt_ids)
+        labels = list(prompt_ids) if train_on_input else [IGNORE_LABEL_ID] * len(prompt_ids)
+        position_ids = list(range(len(prompt_ids)))
+        register_token_index = [0] * len(prompt_ids)
+        base_pos = len(prompt_ids)
+
+        # R_i predicts C_{i+offset}; C_i remains on the ordinary LM objective.
+        for idx, token_id in enumerate(answer_ids):
+            target_idx = idx + offset
+            register_label = (
+                answer_ids[target_idx]
+                if target_idx < len(answer_ids)
+                else IGNORE_LABEL_ID
+            )
+            register_pos = base_pos + min(idx + offset - 1, len(answer_ids) - 1)
+            input_ids.extend((register_token_id, token_id))
+            labels.extend((register_label, token_id))
+            position_ids.extend((register_pos, base_pos + idx))
+            register_token_index.extend((1, 0))
+
+        return dict(
+            input_ids=input_ids,
+            labels=labels,
+            position_ids=position_ids,
+            register_token_index=register_token_index,
+            mtp_offset=offset,
+        )
+
     def aug_data_tokenize(
         self,
         structured_input:List[List],

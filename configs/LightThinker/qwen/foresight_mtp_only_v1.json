@@ -1,0 +1,34 @@
+{
+    "template": {
+        "model": "qwen",
+        "prefix": "system\n",
+        "middle": "<|im_end|>\n<|im_start|>user\n",
+        "suffix": "<|im_end|>\n<|im_start|>assistant\n",
+        "complete": "system\n{system}<|im_end|>\n<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n"
+    },
+    "prompt": {
+        "save_template": true,
+        "level": "sentence",
+        "step": 1,
+        "n_token": 0,
+        "token_name": "<|o_{t_id}|>",
+        "token_desp": "compress output {t_id}"
+    },
+    "output": {
+        "level": "sentence",
+        "step": 1,
+        "n_token": 0,
+        "token_name": "<|o_{t_id}|>",
+        "token_desp": "compress output {t_id}",
+        "meta_compress_step": 1,
+        "compression_ratio": -1,
+        "forzen_model_train_mtp": false,
+        "share_compression_token": false
+    },
+    "mtp": {
+        "foresight_only": true,
+        "mtp_loss_weight": 0.3,
+        "lm_loss_weight": 0.7,
+        "max_offset": 2
+    }
+}

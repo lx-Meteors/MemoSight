@@ -1,5 +1,6 @@
 
 import torch
+import numpy as np
 from typing import List, Dict, Tuple, Union, Optional
 from tqdm import tqdm
 from copy import deepcopy
@@ -42,6 +43,7 @@ class MyDataset(torch.utils.data.Dataset):
         self.recover_prompt_data:List[Dict] = list()    
         self.aug_data_wo_prompt_comp:List[Dict] = list()    
         self.aug_data_wo_prompt_comp_apa_mtp:List[Dict] = list()
+        self.foresight_mtp_data:List[Dict] = list()
 
         self.output_compress_instruction:str = output_compress_instruction if output_compress_instruction != None else ""
 
@@ -50,7 +52,7 @@ class MyDataset(torch.utils.data.Dataset):
         
         # 预处理
         self.init()
-        if self.mode != 'normal':
+        if self.mode not in ('normal', 'mtp-only'):
             self.init_for_aug_data_wo_pc()
     
     #token level，感觉没用到
@@ -273,6 +275,24 @@ class MyDataset(torch.utils.data.Dataset):
                     meta_info=item,
                 )
             )
+            if self.mode == 'mtp-only':
+                if not self.config.mtp_cfg:
+                    raise ValueError("mtp-only mode requires an mtp config block")
+                self.config.convert2id(self.tokenizer)
+                self.foresight_mtp_data.append(
+                    dict(
+                        tokenized=self.tokenizer.foresight_mtp_data_tokenize(
+                            structured_input=structured_input,
+                            max_length=self.padding_config['max_length'],
+                            register_token_id=self.config.register_token_id,
+                            max_offset=int(self.config.mtp_cfg.get('max_offset', 2)),
+                            train_on_input=self.train_on_input,
+                        ),
+                        meta_info=item,
+                    )
+                )
+                pbar.update(1)
+                continue
             if self.mode == 'normal':
                 pbar.update(1)
                 continue
@@ -502,6 +522,8 @@ class MyDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx:int) -> Tuple[Dict, Dict, Dict, Dict, Dict, Dict]:
         if self.mode == 'normal':
             return (self.normal_data[idx], None, None, None, None, None)
+        if self.mode == 'mtp-only':
+            return (self.normal_data[idx], None, None, None, None, self.foresight_mtp_data[idx])
         return (
             self.normal_data[idx],
             self.aug_data[idx],
@@ -969,6 +991,47 @@ class MyDataCollator:
             ),
         )
 
+    def _foresight_mtp_mode(self, instances:List[Tuple]) -> Dict:
+        batch_max_length = max(len(instance[5]['tokenized']['input_ids']) for instance in instances)
+        final = dict(input_ids=[], labels=[], position_ids=[], attention_mask=[], register_token_index=[])
+        for instance in instances:
+            item = instance[5]['tokenized']
+            new_item = padding_item(
+                item=item,
+                padding_side=self.dataset.padding_config['padding_side'],
+                label_padding_id=self.dataset.padding_config['label_padding_id'],
+                input_padding_id=self.dataset.padding_config['input_padding_id'],
+                max_length=batch_max_length,
+                position_ids_padding_id=self.dataset.padding_config['position_ids_padding_id'],
+            )
+            length = len(item['input_ids'])
+            register_index = np.zeros(batch_max_length, dtype=np.int64)
+            register_index[:length] = np.asarray(item['register_token_index'], dtype=np.int64)
+
+            # Ordinary causal attention, except register entries are never
+            # visible as keys (a register may attend to itself).
+            mask = np.tril(np.ones((batch_max_length, batch_max_length), dtype=np.bool_))
+            for register_pos in np.flatnonzero(register_index):
+                mask[:, register_pos] = False
+                mask[register_pos, register_pos] = True
+            if length < batch_max_length and length > 0:
+                mask[length:, :] = False
+                mask[length:, :length] = mask[length - 1:length, :length]
+
+            final['input_ids'].append(new_item['input_ids'])
+            final['labels'].append(new_item['labels'])
+            final['position_ids'].append(new_item['position_ids'])
+            final['attention_mask'].append(torch.as_tensor(mask))
+            final['register_token_index'].append(register_index)
+
+        return dict(
+            input_ids=torch.as_tensor(final['input_ids']),
+            labels=torch.as_tensor(final['labels']),
+            position_ids=torch.as_tensor(final['position_ids']),
+            attention_mask=create_attention_mask(final['attention_mask'], dtype=torch.bfloat16),
+            register_token_index=torch.as_tensor(np.asarray(final['register_token_index'])),
+        )
+
     def __call__(self, instances:List[Tuple]) -> Dict:
         # 'aug', 'normal', 'recover'
         if self.sample_config['mode'] == 'aug':
@@ -981,6 +1044,8 @@ class MyDataCollator:
             return self._aug_mode_wo_pc(instances)
         elif self.sample_config['mode'] == 'aug-wo-pc-apa-mtp':
             return self._aug_mode_wo_pc_apa_mtp(instances)
+        elif self.sample_config['mode'] == 'mtp-only':
+            return self._foresight_mtp_mode(instances)
         else:
             assert False
         if self.sample_config['hybrid'] == True:

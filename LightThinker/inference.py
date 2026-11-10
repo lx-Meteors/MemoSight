@@ -18,6 +18,7 @@ from model_llama import LlamaForCausalLM
 from model_qwen import Qwen3ForCausalLM
 from rkv import RKVCacheCompressor, RKVConfig
 from lazy_eviction import LazyEvictionCompressor, LazyEvictionConfig
+from medusa import MEDUSA_CHOICES_63, MedusaHeads, load_medusa_heads
 from dataset_reader import (
     AIME2026Reader,
     BBHReader,
@@ -820,6 +821,33 @@ class KVUtils:
             self.past_key_values.value_cache[layer_id] = \
                 self.past_key_values.value_cache[layer_id][:, :, 0:new_q_length, :]
 
+    @torch.no_grad()
+    def select_tail(self, origin_length:int, keep_offsets:List[int]):
+        """Replace a speculative cache tail with one accepted tree path."""
+        cache_length = self.past_key_values._seen_tokens
+        tail_length = cache_length - origin_length
+        if origin_length < 0 or tail_length < 0:
+            raise ValueError("invalid cache origin for speculative tail selection")
+        if any(offset < 0 or offset >= tail_length for offset in keep_offsets):
+            raise ValueError("speculative cache offset is out of range")
+        keep = torch.as_tensor(
+            [origin_length + offset for offset in keep_offsets],
+            dtype=torch.long,
+            device=self.past_key_values.key_cache[0].device,
+        )
+        for layer_id in range(len(self.past_key_values.key_cache)):
+            key = self.past_key_values.key_cache[layer_id]
+            value = self.past_key_values.value_cache[layer_id]
+            selected_key = key.index_select(2, keep) if keep_offsets else key[:, :, :0, :]
+            selected_value = value.index_select(2, keep) if keep_offsets else value[:, :, :0, :]
+            self.past_key_values.key_cache[layer_id] = torch.cat(
+                (key[:, :, :origin_length, :], selected_key), dim=2
+            )
+            self.past_key_values.value_cache[layer_id] = torch.cat(
+                (value[:, :, :origin_length, :], selected_value), dim=2
+            )
+        self.past_key_values._seen_tokens = origin_length + len(keep_offsets)
+
     def __del__(self):
         del self.past_key_values.value_cache
         del self.past_key_values.key_cache
@@ -928,6 +956,50 @@ class TokenUtils:
         if return_tensors:
             # 这里切片的原因是前面用的都是kvcache，所以不需要重新考虑position_ids，只需解决当前position_ids
             return self.input_ids[..., _start:_end], self.position_ids[..., _start:_end]
+
+    def set_input_ids_with_positions(self, input_ids:List[int], positions:List[int]):
+        if len(input_ids) != len(positions):
+            raise ValueError("input_ids and positions must have the same length")
+        if self.rolling_rope:
+            raise ValueError("explicit speculative positions require rolling_rope=false")
+        ids, _ = self.set_input_ids(input_ids, return_tensors=True)
+        start = self._seen_tokens - len(input_ids)
+        position_tensor = torch.as_tensor(
+            [positions], dtype=self.position_ids.dtype, device=self.position_ids.device
+        )
+        self.position_ids[:, start:self._seen_tokens] = position_tensor
+        self._current_position_ids[-len(positions):] = positions
+        self._whole_position_ids[-len(positions):] = positions
+        return ids, position_tensor
+
+    def select_tail(self, origin_length:int, keep_offsets:List[int]):
+        """Replace a speculative token tail with one accepted tree path."""
+        tail_length = self._seen_tokens - origin_length
+        if origin_length < 0 or tail_length < 0:
+            raise ValueError("invalid token origin for speculative tail selection")
+        if any(offset < 0 or offset >= tail_length for offset in keep_offsets):
+            raise ValueError("speculative token offset is out of range")
+        tail_ids = self.input_ids[0, origin_length:self._seen_tokens].tolist()
+        tail_positions = self.position_ids[0, origin_length:self._seen_tokens].tolist()
+        kept_ids = [tail_ids[offset] for offset in keep_offsets]
+        kept_positions = [tail_positions[offset] for offset in keep_offsets]
+        new_length = origin_length + len(keep_offsets)
+        if kept_ids:
+            self.input_ids[0, origin_length:new_length] = torch.as_tensor(
+                kept_ids, dtype=self.input_ids.dtype, device=self.input_ids.device
+            )
+            self.position_ids[0, origin_length:new_length] = torch.as_tensor(
+                kept_positions, dtype=self.position_ids.dtype, device=self.position_ids.device
+            )
+        self._current_input_ids = self._current_input_ids[:origin_length] + kept_ids
+        self._current_position_ids = self._current_position_ids[:origin_length] + kept_positions
+        # Speculative nodes are not part of the logical history unless accepted.
+        if tail_length:
+            del self._whole_input_ids[-tail_length:]
+            del self._whole_position_ids[-tail_length:]
+        self._whole_input_ids.extend(kept_ids)
+        self._whole_position_ids.extend(kept_positions)
+        self._seen_tokens = new_length
  
     def reduce_input_ids(self, start:int, end:int):
         origin_length = self._seen_tokens
@@ -1764,6 +1836,475 @@ def _cache_eviction_generate(
 
 
 @torch.no_grad()
+def _foresight_mtp_only_generate(
+    model: Qwen3ForCausalLM,
+    tokenizer: Tokenizer,
+    comp_config: Config,
+    max_new_tokens: int,
+    attn_utils: AttentionUtils,
+    kv_utils: KVUtils,
+    token_utils: TokenUtils,
+    predicted_token_id: int,
+    repetition_penalty: float = 1.0,
+    mtp_draft_len: int = None,
+    mtp_stats: "MTPStats" = None,
+) -> Tuple[str, str]:
+    """Compression-free MemoSight foresight decoding on a Vanilla Qwen3 path."""
+    eos_token_id = tokenizer.eos_token_id
+    gamma = int(
+        mtp_draft_len
+        if mtp_draft_len is not None
+        else comp_config.mtp_cfg.get("max_offset", 2)
+    )
+    gamma = max(gamma, 0)
+    generated = 0
+
+    while predicted_token_id != eos_token_id and generated < max_new_tokens:
+        step_forward_passes = 0
+        token_utils.show_output_input_ids.append(predicted_token_id)
+        generated += 1
+        step_ids = [predicted_token_id] + [comp_config.register_token_id] * gamma
+        if token_utils._seen_tokens + len(step_ids) > token_utils.max_length:
+            break
+
+        attention_mask = attn_utils.update_attention_local_for_mtp_register(
+            origin_length=len(token_utils._current_input_ids),
+            new_input_ids=step_ids,
+            register_token_id=comp_config.register_token_id,
+            indicator=None,
+        )
+        input_ids, position_ids = token_utils.set_input_ids(step_ids, return_tensors=True)
+        model_output = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            past_key_values=kv_utils.get_cache(),
+            use_cache=True,
+            return_dict=True,
+            position_ids=position_ids,
+        )
+        step_forward_passes += 1
+
+        if gamma:
+            reg_start = kv_utils.get_cache()._seen_tokens - gamma
+            reg_end = kv_utils.get_cache()._seen_tokens
+            kv_utils.reduce_cache(reg_start, reg_end)
+            token_utils.reduce_input_ids(reg_start, reg_end)
+
+        draft_tokens = []
+        for offset in range(gamma + 1):
+            draft_tokens.append(
+                InferenceUtils.get_predicted_token_ids(
+                    model_output=model_output,
+                    idx=-(gamma + 1 - offset),
+                    token_utils=token_utils,
+                    repetition_penalty=repetition_penalty,
+                    tokenizer=tokenizer,
+                    extra_generated_ids=draft_tokens,
+                )
+            )
+
+        # With no auxiliary registers this is ordinary greedy decoding.
+        if gamma == 0 or generated >= max_new_tokens:
+            predicted_token_id = draft_tokens[0]
+            if mtp_stats is not None:
+                mtp_stats.record_step(step_forward_passes, 1, False)
+            continue
+
+        remaining = max_new_tokens - generated
+        verify_tokens = draft_tokens[:remaining]
+        if not verify_tokens:
+            predicted_token_id = draft_tokens[0]
+            continue
+        verify_mask = attn_utils.update_attention_local(
+            origin_length=len(token_utils._current_input_ids),
+            new_length=len(verify_tokens),
+            indicator=None,
+        )
+        verify_ids, verify_positions = token_utils.set_input_ids(
+            verify_tokens, return_tensors=True
+        )
+        verify_output = model(
+            input_ids=verify_ids,
+            attention_mask=verify_mask,
+            past_key_values=kv_utils.get_cache(),
+            use_cache=True,
+            return_dict=True,
+            position_ids=verify_positions,
+        )
+        step_forward_passes += 1
+        verify_preds = [
+            InferenceUtils.get_predicted_token_ids(
+                model_output=verify_output,
+                idx=-(len(verify_tokens) - pos),
+                token_utils=token_utils,
+                repetition_penalty=repetition_penalty,
+                tokenizer=tokenizer,
+                extra_generated_ids=verify_tokens[:pos + 1],
+            )
+            for pos in range(len(verify_tokens))
+        ]
+
+        accepted_len = 1
+        for pos in range(len(verify_tokens) - 1):
+            if verify_preds[pos] != verify_tokens[pos + 1]:
+                break
+            accepted_len += 1
+        if mtp_stats is not None:
+            mtp_stats.record_verify(len(verify_tokens) - 1, accepted_len)
+
+        if accepted_len < len(verify_tokens):
+            trim = len(verify_tokens) - accepted_len
+            end = kv_utils.get_cache()._seen_tokens
+            kv_utils.reduce_cache(end - trim, end)
+            token_utils.reduce_input_ids(end - trim, end)
+
+        accepted_tokens = verify_tokens[:accepted_len]
+        eos_pos = next(
+            (idx for idx, token_id in enumerate(accepted_tokens) if token_id == eos_token_id),
+            None,
+        )
+        if eos_pos is not None:
+            keep = eos_pos + 1
+            if keep < accepted_len:
+                trim = accepted_len - keep
+                end = kv_utils.get_cache()._seen_tokens
+                kv_utils.reduce_cache(end - trim, end)
+                token_utils.reduce_input_ids(end - trim, end)
+                accepted_tokens = accepted_tokens[:keep]
+                accepted_len = keep
+
+        token_utils.show_output_input_ids.extend(accepted_tokens)
+        generated += accepted_len
+        if mtp_stats is not None:
+            mtp_stats.record_step(step_forward_passes, 1 + accepted_len, False)
+        if eos_pos is not None:
+            predicted_token_id = eos_token_id
+            break
+        predicted_token_id = verify_preds[accepted_len - 1]
+
+    if predicted_token_id == eos_token_id and (
+        not token_utils.show_output_input_ids
+        or token_utils.show_output_input_ids[-1] != eos_token_id
+    ):
+        token_utils.show_output_input_ids.append(eos_token_id)
+    return (
+        tokenizer.decode(token_utils.show_prompt_input_ids),
+        tokenizer.decode(token_utils.show_output_input_ids),
+    )
+
+
+@torch.no_grad()
+def _breadcrumbs_generate(
+    model: Qwen3ForCausalLM,
+    tokenizer: Tokenizer,
+    max_new_tokens: int,
+    kv_utils: KVUtils,
+    token_utils: TokenUtils,
+    predicted_token_id: int,
+    beacon_token_id: int,
+    compression_ratio: int,
+    repetition_penalty: float = 1.0,
+    stats: Dict = None,
+) -> Tuple[str, str]:
+    """Breadcrumbs decode: replace every c generated KVs with one beacon KV."""
+    eos_token_id = tokenizer.eos_token_id
+    generated = 0
+    block_tokens = 0
+    beacon_count = 0
+    peak_kv_tokens = kv_utils.get_cache().get_seq_length()
+
+    while predicted_token_id != eos_token_id and generated < max_new_tokens:
+        token_utils.show_output_input_ids.append(predicted_token_id)
+        content_ids, content_positions = token_utils.set_input_ids(
+            [predicted_token_id], return_tensors=True
+        )
+        content_output = model(
+            input_ids=content_ids,
+            attention_mask=None,
+            past_key_values=kv_utils.get_cache(),
+            use_cache=True,
+            return_dict=True,
+            position_ids=content_positions,
+            cache_position=content_positions.reshape(-1),
+        )
+        peak_kv_tokens = max(peak_kv_tokens, kv_utils.get_cache().get_seq_length())
+        predicted_token_id = InferenceUtils.get_predicted_token_ids(
+            model_output=content_output,
+            idx=-1,
+            token_utils=token_utils,
+            repetition_penalty=repetition_penalty,
+            tokenizer=tokenizer,
+        )
+        generated += 1
+        block_tokens += 1
+
+        if block_tokens == compression_ratio and generated < max_new_tokens:
+            logical_tail = int(content_positions[0, -1].item())
+            beacon_ids, beacon_positions = token_utils.set_input_ids(
+                [beacon_token_id], return_tensors=True
+            )
+            beacon_positions.fill_(logical_tail)
+            token_utils.position_ids[0, token_utils._seen_tokens - 1] = logical_tail
+            token_utils._current_position_ids[-1] = logical_tail
+            token_utils._whole_position_ids[-1] = logical_tail
+            beacon_output = model(
+                input_ids=beacon_ids,
+                attention_mask=None,
+                past_key_values=kv_utils.get_cache(),
+                use_cache=True,
+                return_dict=True,
+                position_ids=beacon_positions,
+                cache_position=beacon_positions.reshape(-1),
+            )
+            peak_kv_tokens = max(peak_kv_tokens, kv_utils.get_cache().get_seq_length())
+            predicted_token_id = InferenceUtils.get_predicted_token_ids(
+                model_output=beacon_output,
+                idx=-1,
+                token_utils=token_utils,
+                repetition_penalty=repetition_penalty,
+                tokenizer=tokenizer,
+            )
+
+            # [..., c content tokens, beacon] -> [..., beacon]
+            cache_end = kv_utils.get_cache()._seen_tokens
+            start = cache_end - compression_ratio - 1
+            end = cache_end - 1
+            kv_utils.reduce_cache(start, end)
+            token_utils.reduce_input_ids(start, end)
+            block_tokens = 0
+            beacon_count += 1
+
+    if predicted_token_id == eos_token_id and generated < max_new_tokens:
+        token_utils.show_output_input_ids.append(eos_token_id)
+    if stats is not None:
+        stats.update(
+            compression_ratio=compression_ratio,
+            beacon_count=beacon_count,
+            generated_tokens=min(len(token_utils.show_output_input_ids), max_new_tokens),
+            peak_kv_tokens=peak_kv_tokens,
+            final_kv_tokens=kv_utils.get_cache().get_seq_length(),
+        )
+    return (
+        tokenizer.decode(token_utils.show_prompt_input_ids),
+        tokenizer.decode(token_utils.show_output_input_ids),
+    )
+
+
+@torch.no_grad()
+def _sentence_level_medusa_generate(
+    model: Qwen3ForCausalLM,
+    medusa_heads: MedusaHeads,
+    tokenizer: Tokenizer,
+    comp_config: Config,
+    max_new_tokens: int,
+    attn_utils: AttentionUtils,
+    kv_utils: KVUtils,
+    token_utils: TokenUtils,
+    predicted_token_id: int,
+    last_hidden_state: torch.Tensor,
+    repetition_penalty: float = 1.0,
+    stats: Dict = None,
+) -> Tuple[str, str]:
+    """Greedy Medusa-1 verification while preserving LightThinker compression."""
+    eos_token_id = tokenizer.eos_token_id
+    global_start = len(token_utils._whole_input_ids)
+    local_start = len(token_utils._current_input_ids)
+    van_cot_start = global_start
+    generated = 0
+    decode_steps = 0
+    forward_passes = 0
+    accepted_total = 0
+    proposed_total = 0
+    compression_steps = 0
+    last_hidden_state = last_hidden_state[:, -1:, :]
+
+    while predicted_token_id != eos_token_id and generated < max_new_tokens:
+        # A splitter must execute LightThinker's original replacement path;
+        # speculative candidates never cross this control boundary.
+        if predicted_token_id == comp_config.split_token_id:
+            token_utils.show_output_input_ids.append(predicted_token_id)
+            generated += 1
+            last_pos = int(token_utils.get_position_ids()[0, -1].item())
+            cot_length = last_pos + 2 - van_cot_start
+            new_ids = [predicted_token_id]
+            new_ids.extend(comp_config.get_output_comp_token_id(cot_length=cot_length))
+            new_ids.append(comp_config.continue_token_id)
+            if token_utils._seen_tokens + len(new_ids) > token_utils.max_length:
+                break
+            origin_length = len(token_utils._current_input_ids)
+            indicator = [
+                local_start,
+                origin_length + 1,
+                0,
+                origin_length + 1,
+                origin_length + 1 + len(new_ids) - 2,
+                1,
+            ]
+            attention_mask = attn_utils.update_attention_local(
+                origin_length=origin_length,
+                new_length=len(new_ids),
+                indicator=indicator,
+            )
+            local_mask_end = origin_length + 1
+            input_ids, position_ids = token_utils.set_input_ids(new_ids, return_tensors=True)
+            van_cot_start = int(position_ids[0, -1].item()) + 1
+            output = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                past_key_values=kv_utils.get_cache(),
+                use_cache=True,
+                return_dict=True,
+                output_hidden_states=True,
+                position_ids=position_ids,
+            )
+            forward_passes += 1
+            kv_utils.reduce_cache(local_start, local_mask_end)
+            token_utils.reduce_input_ids(local_start, local_mask_end)
+            global_start = len(token_utils._whole_input_ids)
+            local_start = len(token_utils._current_input_ids)
+            predicted_token_id = InferenceUtils.get_predicted_token_ids(
+                output,
+                idx=-1,
+                token_utils=token_utils,
+                repetition_penalty=repetition_penalty,
+                tokenizer=tokenizer,
+            )
+            last_hidden_state = output.hidden_states[-1][:, -1:, :]
+            compression_steps += 1
+            decode_steps += 1
+            continue
+
+        # Medusa-1 sparse tree: root is the target model's greedy token; every
+        # path element chooses a top-k rank from the corresponding future head.
+        # The published 63-node tree is trimmed only by the available number of
+        # heads and by the common output-token ceiling.
+        remaining = max_new_tokens - generated
+        future_logits = medusa_heads.future_logits(last_hidden_state, model.lm_head)
+        max_depth = min(medusa_heads.num_heads, max(remaining - 1, 0))
+        choices = sorted(
+            (tuple(path) for path in MEDUSA_CHOICES_63 if len(path) <= max_depth),
+            key=lambda path: (len(path), path),
+        )
+        topk_by_depth = [
+            torch.topk(logits[0, -1], k=min(10, logits.shape[-1])).indices.tolist()
+            for logits in future_logits[:max_depth]
+        ]
+        tree_tokens = [predicted_token_id]
+        tree_paths = [tuple()]
+        for path in choices:
+            tree_paths.append(path)
+            tree_tokens.append(topk_by_depth[len(path) - 1][path[-1]])
+
+        origin_length = len(token_utils._current_input_ids)
+        path_to_node = {path: node for node, path in enumerate(tree_paths)}
+        tree_size = len(tree_tokens)
+        attention_mask = torch.full(
+            (1, 1, tree_size, origin_length + tree_size),
+            fill_value=attn_utils.mask_value,
+            dtype=attn_utils.dtype,
+            device=last_hidden_state.device,
+        )
+        attention_mask[:, :, :, :origin_length] = attn_utils.show_value
+        for node, path in enumerate(tree_paths):
+            attention_mask[0, 0, node, origin_length] = attn_utils.show_value
+            for depth in range(1, len(path) + 1):
+                ancestor = path_to_node[path[:depth]]
+                attention_mask[0, 0, node, origin_length + ancestor] = attn_utils.show_value
+
+        logical_root = int(token_utils.get_position_ids()[0, -1].item()) + 1
+        tree_positions = [logical_root + len(path) for path in tree_paths]
+        candidate_ids, candidate_positions = token_utils.set_input_ids_with_positions(
+            tree_tokens, tree_positions
+        )
+        verify_output = model(
+            input_ids=candidate_ids,
+            attention_mask=attention_mask,
+            past_key_values=kv_utils.get_cache(),
+            use_cache=True,
+            return_dict=True,
+            output_hidden_states=True,
+            position_ids=candidate_positions,
+        )
+        forward_passes += 1
+        verify_preds = []
+        for node, path in enumerate(tree_paths):
+            path_nodes = [0] + [path_to_node[path[:depth]] for depth in range(1, len(path) + 1)]
+            path_tokens = [tree_tokens[path_node] for path_node in path_nodes]
+            verify_preds.append(
+                InferenceUtils.get_predicted_token_ids(
+                    verify_output,
+                    idx=node,
+                    token_utils=token_utils,
+                    repetition_penalty=repetition_penalty,
+                    tokenizer=tokenizer,
+                    extra_generated_ids=path_tokens,
+                )
+            )
+
+        accepted_nodes = [0]
+        for path in choices:
+            nodes = [0] + [path_to_node[path[:depth]] for depth in range(1, len(path) + 1)]
+            accepted = [0]
+            for parent_node, child_node in zip(nodes[:-1], nodes[1:]):
+                if verify_preds[parent_node] != tree_tokens[child_node]:
+                    break
+                accepted.append(child_node)
+            if len(accepted) > len(accepted_nodes):
+                accepted_nodes = accepted
+        accepted_tokens = [tree_tokens[node] for node in accepted_nodes]
+        proposed_total += tree_size
+
+        control_index = next(
+            (
+                idx
+                for idx, token_id in enumerate(accepted_tokens)
+                if token_id in (comp_config.split_token_id, eos_token_id)
+            ),
+            None,
+        )
+        committed_len = len(accepted_nodes) if control_index is None else control_index
+        keep_nodes = accepted_nodes[:committed_len]
+        kv_utils.select_tail(origin_length, keep_nodes)
+        token_utils.select_tail(origin_length, keep_nodes)
+
+        committed = accepted_tokens[:committed_len]
+        token_utils.show_output_input_ids.extend(committed)
+        generated += committed_len
+        accepted_total += committed_len
+        decode_steps += 1
+        if committed_len:
+            last_node = keep_nodes[-1]
+            last_hidden_state = verify_output.hidden_states[-1][:, last_node:last_node + 1, :]
+
+        if control_index is not None:
+            predicted_token_id = accepted_tokens[control_index]
+        else:
+            predicted_token_id = verify_preds[accepted_nodes[-1]]
+
+    if predicted_token_id == eos_token_id and generated < max_new_tokens:
+        token_utils.show_output_input_ids.append(eos_token_id)
+    if stats is not None:
+        stats.update(
+            num_heads=medusa_heads.num_heads,
+            num_layers=medusa_heads.num_layers,
+            tree_name="mc_sim_7b_63",
+            max_tree_nodes=64,
+            decode_steps=decode_steps,
+            forward_passes=forward_passes,
+            proposed_tokens=proposed_total,
+            accepted_tokens=accepted_total,
+            mean_accepted_tokens=(accepted_total / max(decode_steps - compression_steps, 1)),
+            tokens_per_target_forward=(generated / max(forward_passes, 1)),
+            compression_steps=compression_steps,
+            peak_kv_tokens=token_utils.max_token,
+        )
+    return (
+        tokenizer.decode(token_utils.show_prompt_input_ids),
+        tokenizer.decode(token_utils.show_output_input_ids),
+    )
+
+
+@torch.no_grad()
 def _sentence_level_mtp_register_generate(
     model: Union[LlamaForCausalLM, Qwen3ForCausalLM],
     tokenizer: Tokenizer,
@@ -2187,6 +2728,10 @@ def generate(
     rkv_stats:Dict=None,
     lazy_eviction_config:LazyEvictionConfig=None,
     lazy_eviction_stats:Dict=None,
+    breadcrumbs_config:Dict=None,
+    breadcrumbs_stats:Dict=None,
+    medusa_heads:MedusaHeads=None,
+    medusa_stats:Dict=None,
 ) -> Tuple[str,str]:
 
     assert update_attention_method in ['global', 'local'], update_attention_method
@@ -2219,7 +2764,22 @@ def generate(
     )
 
     # 2. auto-regressive generation
-    if rkv_compressor is not None:
+    if medusa_heads is not None:
+        prompt, output = _sentence_level_medusa_generate(
+            model=model,
+            medusa_heads=medusa_heads,
+            tokenizer=tokenizer,
+            comp_config=comp_config,
+            max_new_tokens=max_new_tokens,
+            attn_utils=attn_utils,
+            kv_utils=kv_utils,
+            token_utils=token_utils,
+            predicted_token_id=predicted_token_id,
+            last_hidden_state=last_hidden_state,
+            repetition_penalty=repetition_penalty,
+            stats=medusa_stats,
+        )
+    elif rkv_compressor is not None:
         prompt, output = _cache_eviction_generate(
             model=model,
             tokenizer=tokenizer,
@@ -2245,6 +2805,37 @@ def generate(
         )
         if lazy_eviction_stats is not None:
             lazy_eviction_stats.update(lazy_eviction_compressor.summary())
+    elif (
+        comp_config.mtp_cfg
+        and comp_config.mtp_cfg.get('foresight_only', False)
+        and spec_decode
+    ):
+        prompt, output = _foresight_mtp_only_generate(
+            model=model,
+            tokenizer=tokenizer,
+            comp_config=comp_config,
+            max_new_tokens=max_new_tokens,
+            attn_utils=attn_utils,
+            kv_utils=kv_utils,
+            token_utils=token_utils,
+            predicted_token_id=predicted_token_id,
+            repetition_penalty=repetition_penalty,
+            mtp_draft_len=mtp_draft_len,
+            mtp_stats=mtp_stats,
+        )
+    elif breadcrumbs_config is not None:
+        prompt, output = _breadcrumbs_generate(
+            model=model,
+            tokenizer=tokenizer,
+            max_new_tokens=max_new_tokens,
+            kv_utils=kv_utils,
+            token_utils=token_utils,
+            predicted_token_id=predicted_token_id,
+            beacon_token_id=breadcrumbs_config['beacon_token_id'],
+            compression_ratio=breadcrumbs_config['compression_ratio'],
+            repetition_penalty=repetition_penalty,
+            stats=breadcrumbs_stats,
+        )
     elif comp_config.output_comp_level == 'token':
         prompt, output = _token_level_generate(
             model=model,
@@ -2359,6 +2950,16 @@ def get_parser():
     parser.add_argument('--lazy_budget', type=int, default=4915)
     parser.add_argument('--lazy_window_size', type=int, default=363)
     parser.add_argument('--lazy_alpha', type=float, default=0.0001)
+    parser.add_argument(
+        '--breadcrumbs',
+        type=str2bool,
+        default=False,
+        help='Enable learned Breadcrumbs beacon compression.',
+    )
+    parser.add_argument('--breadcrumbs_compression_ratio', type=int, default=16)
+    parser.add_argument('--breadcrumbs_beacon_token', type=str, default='<|breadcrumb|>')
+    parser.add_argument('--medusa', type=str2bool, default=False)
+    parser.add_argument('--medusa_head_path', type=str, default=None)
 
     parser.add_argument('--bos_token', type=str)
     parser.add_argument('--eos_token', type=str)
@@ -2421,8 +3022,13 @@ def get_model_and_tokenizer(
     )
 
     if not args.vanilla:
-        for token in comp_config.special_token_name_list:
-            if tokenizer.convert_tokens_to_ids(token) == None:
+        config_tokens = (
+            [comp_config.register_token]
+            if comp_config.mtp_cfg and comp_config.mtp_cfg.get('foresight_only', False)
+            else comp_config.special_token_name_list
+        )
+        for token in config_tokens:
+            if token not in tokenizer.tokenizer.get_vocab():
                 special_token_list.append(token)
         if len(special_token_list) > 0:
             tokenizer.add_special_token(special_token_list)
@@ -2483,6 +3089,8 @@ def eval_dataset(
     profile_breakdown:bool=False,
     rkv_config:RKVConfig=None,
     lazy_eviction_config:LazyEvictionConfig=None,
+    breadcrumbs_config:Dict=None,
+    medusa_heads:MedusaHeads=None,
     run_signature:Dict=None,
 ):
 
@@ -2556,9 +3164,16 @@ def eval_dataset(
                     and item.get('lazy_eviction_stats', {}).get('alpha') == lazy_eviction_config.alpha
                     for item in data_copy_list
                 )
+            valid_breadcrumbs = True
+            if breadcrumbs_config is not None:
+                valid_breadcrumbs = all(
+                    item.get('breadcrumbs_stats', {}).get('compression_ratio')
+                    == breadcrumbs_config['compression_ratio']
+                    for item in data_copy_list
+                )
             if (
                 valid_prefix and valid_length and valid_cap and valid_signature
-                and valid_rkv and valid_lazy
+                and valid_rkv and valid_lazy and valid_breadcrumbs
             ):
                 start = _id_list[-1] + 1
             else:
@@ -2621,6 +3236,8 @@ def eval_dataset(
             sample_stats = MTPStats(profile=profile_breakdown) if spec_decode else None
             sample_rkv_stats = {} if rkv_config is not None else None
             sample_lazy_eviction_stats = {} if lazy_eviction_config is not None else None
+            sample_breadcrumbs_stats = {} if breadcrumbs_config is not None else None
+            sample_medusa_stats = {} if medusa_heads is not None else None
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
@@ -2653,6 +3270,10 @@ def eval_dataset(
                 rkv_stats=sample_rkv_stats,
                 lazy_eviction_config=lazy_eviction_config,
                 lazy_eviction_stats=sample_lazy_eviction_stats,
+                breadcrumbs_config=breadcrumbs_config,
+                breadcrumbs_stats=sample_breadcrumbs_stats,
+                medusa_heads=medusa_heads,
+                medusa_stats=sample_medusa_stats,
             )
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -2703,6 +3324,12 @@ def eval_dataset(
             if sample_lazy_eviction_stats is not None:
                 record["lazy_eviction_stats"] = sample_lazy_eviction_stats
                 record["peak_kv_tokens"] = sample_lazy_eviction_stats["peak_kv_tokens"]
+            if sample_breadcrumbs_stats is not None:
+                record["breadcrumbs_stats"] = sample_breadcrumbs_stats
+                record["peak_kv_tokens"] = sample_breadcrumbs_stats["peak_kv_tokens"]
+            if sample_medusa_stats is not None:
+                record["medusa_stats"] = sample_medusa_stats
+                record["peak_kv_tokens"] = sample_medusa_stats["peak_kv_tokens"]
             writer.write(record)
             pbar.set_description(f"model:`{model_answer}`; gt:`{gt_answer}`; correct:{acc_state}; acc: {acc}/{total}={round(acc/total, 5)}; input: {input_len}; output: {output_len}; `{comp_pattern}`; max_token: {token_utils.max_token}")
             token_utils.reset()
@@ -2726,8 +3353,10 @@ def main():
 
     rkv_config = None
     lazy_eviction_config = None
-    if args.rkv and args.lazy_eviction:
-        raise ValueError('R-KV and LazyEviction cannot be enabled in the same run')
+    breadcrumbs_config = None
+    medusa_heads = None
+    if sum(bool(value) for value in (args.rkv, args.lazy_eviction, args.breadcrumbs, args.medusa)) > 1:
+        raise ValueError('R-KV, LazyEviction, Breadcrumbs, and Medusa are mutually exclusive')
     if args.rkv:
         if not args.vanilla:
             raise ValueError('R-KV must be combined with --vanilla true')
@@ -2771,12 +3400,41 @@ def main():
         )
         lazy_eviction_config.validate()
         print(f'LazyEviction config: {lazy_eviction_config}')
+    if args.breadcrumbs:
+        if not args.vanilla:
+            raise ValueError('Breadcrumbs uses the base vocabulary plus its learned beacon; use --vanilla true')
+        if args.model_type.lower() != 'qwen':
+            raise ValueError('This Breadcrumbs adapter currently supports Qwen3 only')
+        if args.use_EPL or args.spec_decode or args.prefill_compress or args.compress_prompt:
+            raise ValueError('Breadcrumbs must disable EPL, speculative decode, and prompt compression')
+        if args.rolling_rope:
+            raise ValueError('Breadcrumbs requires the original logical RoPE timeline')
+        if args.breadcrumbs_compression_ratio < 2:
+            raise ValueError('Breadcrumbs compression ratio must be at least 2')
+    if args.medusa:
+        if args.vanilla:
+            raise ValueError('Medusa baseline here targets LightThinker, not Vanilla')
+        if args.model_type.lower() != 'qwen':
+            raise ValueError('This Medusa adapter currently supports Qwen3 LightThinker only')
+        if not args.medusa_head_path or not os.path.isdir(args.medusa_head_path):
+            raise ValueError(f'Invalid --medusa_head_path: {args.medusa_head_path}')
+        if args.use_EPL or args.spec_decode or args.prefill_compress or args.compress_prompt:
+            raise ValueError('LightThinker+Medusa requires EPL/spec_decode/prompt compression disabled')
+        if args.update_attention_method != 'local':
+            raise ValueError('LightThinker+Medusa currently requires local attention updates')
 
     comp_config = Config.from_file(args.compress_config)
+    if comp_config.mtp_cfg and comp_config.mtp_cfg.get('foresight_only', False):
+        if not args.spec_decode:
+            raise ValueError('foresight-MTP-only checkpoints require --spec_decode true')
+        if args.vanilla:
+            raise ValueError('foresight-MTP-only needs its registered token; use --vanilla false')
+        if args.use_EPL or args.prefill_compress or args.compress_prompt:
+            raise ValueError('foresight-MTP-only disables EPL and all prompt compression')
     with open(args.compress_config, 'rb') as config_file:
         compress_config_sha256 = hashlib.sha256(config_file.read()).hexdigest()
     run_signature = dict(
-        schema_version='long_math_v2',
+        schema_version='long_math_v3',
         model_path=os.path.realpath(args.model_path) if args.model_path else None,
         tokenizer_path=os.path.realpath(args.tokenizer_path) if args.tokenizer_path else None,
         compress_config=os.path.realpath(args.compress_config),
@@ -2812,6 +3470,16 @@ def main():
         lazy_budget=args.lazy_budget if args.lazy_eviction else None,
         lazy_window_size=args.lazy_window_size if args.lazy_eviction else None,
         lazy_alpha=args.lazy_alpha if args.lazy_eviction else None,
+        breadcrumbs=args.breadcrumbs,
+        breadcrumbs_compression_ratio=(
+            args.breadcrumbs_compression_ratio if args.breadcrumbs else None
+        ),
+        breadcrumbs_beacon_token=(args.breadcrumbs_beacon_token if args.breadcrumbs else None),
+        medusa=args.medusa,
+        medusa_tree=("mc_sim_7b_63" if args.medusa else None),
+        medusa_head_path=(
+            os.path.realpath(args.medusa_head_path) if args.medusa else None
+        ),
     )
     attention_config = dict(
         diagonal=args.diagonal,
@@ -2825,6 +3493,51 @@ def main():
     model, tokenizer = get_model_and_tokenizer(
         args, comp_config
     )
+    if comp_config.mtp_cfg and comp_config.mtp_cfg.get('foresight_only', False):
+        if not bool(getattr(model.config, 'foresight_only', False)):
+            raise ValueError(
+                'The selected model checkpoint was not trained in foresight-MTP-only mode'
+            )
+    if args.breadcrumbs:
+        if args.breadcrumbs_beacon_token not in tokenizer.tokenizer.get_vocab():
+            raise ValueError(
+                f'Breadcrumbs beacon {args.breadcrumbs_beacon_token!r} is missing '
+                'from the checkpoint tokenizer'
+            )
+        beacon_token_id = tokenizer.convert_tokens_to_ids(args.breadcrumbs_beacon_token)
+        if beacon_token_id is None or beacon_token_id >= model.config.vocab_size:
+            raise ValueError(
+                f'Breadcrumbs beacon {args.breadcrumbs_beacon_token!r} is missing from the checkpoint tokenizer/model'
+            )
+        trained_ratio = getattr(model.config, 'breadcrumbs_compression_ratio', None)
+        trained_beacon_id = getattr(model.config, 'breadcrumbs_beacon_token_id', None)
+        if trained_ratio is None or trained_beacon_id is None:
+            raise ValueError('The selected checkpoint is not a trained Breadcrumbs student')
+        if int(trained_beacon_id) != beacon_token_id:
+            raise ValueError(
+                f'checkpoint beacon id {trained_beacon_id} does not match tokenizer id {beacon_token_id}'
+            )
+        if int(trained_ratio) != args.breadcrumbs_compression_ratio:
+            raise ValueError(
+                f'checkpoint was trained with Breadcrumbs ratio {trained_ratio}, '
+                f'but inference requested {args.breadcrumbs_compression_ratio}'
+            )
+        breadcrumbs_config = dict(
+            compression_ratio=args.breadcrumbs_compression_ratio,
+            beacon_token_id=beacon_token_id,
+        )
+    if args.medusa:
+        model_parameter = next(model.parameters())
+        medusa_heads = load_medusa_heads(
+            args.medusa_head_path,
+            hidden_size=model.config.hidden_size,
+            device=model_parameter.device,
+            dtype=model_parameter.dtype,
+        )
+        print(
+            f'Loaded Medusa heads: path={args.medusa_head_path}, '
+            f'heads={medusa_heads.num_heads}, layers={medusa_heads.num_layers}'
+        )
 
     all_tasks = {
         "mmlu": MMLUReader(),
@@ -2874,6 +3587,8 @@ def main():
             profile_breakdown=args.profile_breakdown,
             rkv_config=rkv_config,
             lazy_eviction_config=lazy_eviction_config,
+            breadcrumbs_config=breadcrumbs_config,
+            medusa_heads=medusa_heads,
             run_signature=run_signature,
         )
 

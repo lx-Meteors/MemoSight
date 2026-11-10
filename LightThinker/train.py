@@ -258,7 +258,7 @@ def get_parser():
     parser.add_argument('--see_current', type=str2bool)
     parser.add_argument('--bi_directional', type=str2bool)
     parser.add_argument('--diagonal', type=str2bool)
-    parser.add_argument('--mode', type=str, choices=['recover', 'normal', 'aug', 'aug-wo-pc', 'aug-wo-pc-apa-mtp'])
+    parser.add_argument('--mode', type=str, choices=['recover', 'normal', 'aug', 'aug-wo-pc', 'aug-wo-pc-apa-mtp', 'mtp-only'])
     parser.add_argument('--exclude_continue', type=str2bool)
     parser.add_argument('--qkv', type=str)
     parser.add_argument('--freeze_model', type=str2bool)
@@ -299,10 +299,17 @@ def get_model_and_tokenizer(
     )
     # A true Vanilla run must keep the base tokenizer/vocabulary unchanged.
     # Compression modes still add their control and compression tokens.
-    if args.mode != 'normal':
+    if args.mode == 'mtp-only':
+        token = comp_config.register_token
+        if token not in tokenizer.tokenizer.get_vocab():
+            special_token_list.append(token)
+            special_token_desp_dict[token] = comp_config.register_token_desp
+        if special_token_list:
+            tokenizer.add_special_token(special_token_list)
+    elif args.mode != 'normal':
         assert len(comp_config.special_token_desp_list) == len(comp_config.special_token_name_list)
         for desp, token in zip(comp_config.special_token_desp_list, comp_config.special_token_name_list):
-            if tokenizer.convert_tokens_to_ids(token) == None:
+            if token not in tokenizer.tokenizer.get_vocab():
                 special_token_list.append(token)
                 special_token_desp_dict[token] = desp
         if len(special_token_list) > 0:

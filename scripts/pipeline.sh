@@ -127,6 +127,11 @@ print_help() {
   --lazy_budget             Retained KV-token budget (default 4915)
   --lazy_window_size        Observation/eviction interval W (default 363)
   --lazy_alpha              Recurring-attention threshold (default 0.0001)
+  --breadcrumbs             Enable learned Breadcrumbs compression (default false)
+  --breadcrumbs_compression_ratio  Beacon interval c (default 16)
+  --breadcrumbs_beacon_token       Learned beacon token (default <|breadcrumb|>)
+  --medusa                  Enable LightThinker Medusa-1 decoding (default false)
+  --medusa_head_path        Trained Medusa head checkpoint directory
 
 兼容参数:
   --model_path               兼容旧参数：按 stage 映射到 train/infer；stage=all 时仅用于训练
@@ -213,6 +218,11 @@ save_param_snapshot() {
         echo "lazy_budget=${LAZY_BUDGET}"
         echo "lazy_window_size=${LAZY_WINDOW_SIZE}"
         echo "lazy_alpha=${LAZY_ALPHA}"
+        echo "breadcrumbs=${BREADCRUMBS}"
+        echo "breadcrumbs_compression_ratio=${BREADCRUMBS_COMPRESSION_RATIO}"
+        echo "breadcrumbs_beacon_token=${BREADCRUMBS_BEACON_TOKEN}"
+        echo "medusa=${MEDUSA}"
+        echo "medusa_head_path=${MEDUSA_HEAD_PATH}"
         echo "seed=${SEED}"
     } > "${snapshot}"
     link_latest "${snapshot}" "run_latest.txt"
@@ -381,6 +391,11 @@ run_infer() {
                 --lazy_budget "${LAZY_BUDGET}" \
                 --lazy_window_size "${LAZY_WINDOW_SIZE}" \
                 --lazy_alpha "${LAZY_ALPHA}" \
+                --breadcrumbs "${BREADCRUMBS}" \
+                --breadcrumbs_compression_ratio "${BREADCRUMBS_COMPRESSION_RATIO}" \
+                --breadcrumbs_beacon_token "${BREADCRUMBS_BEACON_TOKEN}" \
+                --medusa "${MEDUSA}" \
+                --medusa_head_path "${MEDUSA_HEAD_PATH}" \
                 --datasets "${ds_arr[@]}" \
                 > "${output_tag}/inference_log/${infer_mode_dir}/${real_index}_${model_short_tag}_${resolved_ckpt}.txt" 2>&1 &
             pids+=("$!")
@@ -536,6 +551,11 @@ LAZY_EVICTION="false"
 LAZY_BUDGET=4915
 LAZY_WINDOW_SIZE=363
 LAZY_ALPHA="0.0001"
+BREADCRUMBS="false"
+BREADCRUMBS_COMPRESSION_RATIO=16
+BREADCRUMBS_BEACON_TOKEN="<|breadcrumb|>"
+MEDUSA="false"
+MEDUSA_HEAD_PATH=""
 
 # 评估参数
 EVAL_METHOD="normal"
@@ -616,6 +636,11 @@ while [[ $# -gt 0 ]]; do
         --lazy_budget) LAZY_BUDGET="${2:-}"; shift 2 ;;
         --lazy_window_size) LAZY_WINDOW_SIZE="${2:-}"; shift 2 ;;
         --lazy_alpha) LAZY_ALPHA="${2:-}"; shift 2 ;;
+        --breadcrumbs) BREADCRUMBS="${2:-}"; shift 2 ;;
+        --breadcrumbs_compression_ratio) BREADCRUMBS_COMPRESSION_RATIO="${2:-}"; shift 2 ;;
+        --breadcrumbs_beacon_token) BREADCRUMBS_BEACON_TOKEN="${2:-}"; shift 2 ;;
+        --medusa) MEDUSA="${2:-}"; shift 2 ;;
+        --medusa_head_path) MEDUSA_HEAD_PATH="${2:-}"; shift 2 ;;
 
         # 评估参数
         --eval_method) EVAL_METHOD="${2:-}"; shift 2 ;;
