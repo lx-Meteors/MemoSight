@@ -249,11 +249,9 @@ run_train() {
     local ds_cfg
     ds_cfg="$(to_abs_path "${DEEPSPEED_CONFIG}")"
     require_file "${ds_cfg}"
-    local resume_args=()
     if [[ -n "${RESUME_FROM_CHECKPOINT}" ]]; then
         [[ -d "${RESUME_FROM_CHECKPOINT}" ]] \
             || die "resume checkpoint directory does not exist: ${RESUME_FROM_CHECKPOINT}"
-        resume_args=(--resume_from_checkpoint "${RESUME_FROM_CHECKPOINT}")
         log "Explicitly resuming training from: ${RESUME_FROM_CHECKPOINT}"
     fi
 
@@ -291,7 +289,8 @@ run_train() {
         --lr_scheduler_type "${LR_SCHEDULER_TYPE}" \
         --use_EPL "${USE_EPL}" \
         --seed "${SEED}" \
-        "${resume_args[@]}" 2>&1 | tee "${log_file}"
+        --resume_from_checkpoint "${RESUME_FROM_CHECKPOINT}" \
+        2>&1 | tee "${log_file}"
     local exit_code=${PIPESTATUS[0]}
     link_latest "${log_file}" "train_latest.log"
     [[ "${exit_code}" -eq 0 ]] || die "训练失败，日志: ${log_file}"
