@@ -216,7 +216,7 @@ def parse_args():
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--deepspeed", required=True)
     parser.add_argument("--max_length", type=int, default=4096)
-    parser.add_argument("--compression_ratio", type=int, default=16)
+    parser.add_argument("--compression_ratio", type=int, default=5)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--micro_batch_size", type=int, default=1)

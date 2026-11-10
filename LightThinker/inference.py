@@ -2287,8 +2287,13 @@ def _sentence_level_medusa_generate(
         stats.update(
             num_heads=medusa_heads.num_heads,
             num_layers=medusa_heads.num_layers,
-            tree_name="mc_sim_7b_63",
-            max_tree_nodes=64,
+            tree_name=f"mc_sim_7b_63_depth_{medusa_heads.num_heads}",
+            max_tree_nodes=(
+                1 + sum(
+                    len(path) <= medusa_heads.num_heads
+                    for path in MEDUSA_CHOICES_63
+                )
+            ),
             decode_steps=decode_steps,
             forward_passes=forward_passes,
             proposed_tokens=proposed_total,
@@ -2956,7 +2961,7 @@ def get_parser():
         default=False,
         help='Enable learned Breadcrumbs beacon compression.',
     )
-    parser.add_argument('--breadcrumbs_compression_ratio', type=int, default=16)
+    parser.add_argument('--breadcrumbs_compression_ratio', type=int, default=5)
     parser.add_argument('--breadcrumbs_beacon_token', type=str, default='<|breadcrumb|>')
     parser.add_argument('--medusa', type=str2bool, default=False)
     parser.add_argument('--medusa_head_path', type=str, default=None)
@@ -3012,6 +3017,13 @@ def get_model_and_tokenizer(
     else:
         model_path = args.model_path
     print(f"load model from `{model_path}` ...")
+    requested_dtype = getattr(args, 'dtype', 'bfloat16')
+    torch_dtype = {
+        'bfloat16': torch.bfloat16,
+        'float32': torch.float32,
+    }.get(requested_dtype)
+    if torch_dtype is None:
+        raise ValueError(f'unsupported model dtype: {requested_dtype}')
     special_token_list:List[str] = list()
     tokenizer: Tokenizer = Tokenizer(
         tokenizer_path=args.tokenizer_path if args.tokenizer_path != None else model_path,
@@ -3045,12 +3057,12 @@ def get_model_and_tokenizer(
                 f"model_type={model_config.model_type!r}."
             )
         model = Qwen3ForCausalLM.from_pretrained(
-            model_path, config=model_config, torch_dtype=torch.bfloat16, device_map="auto",
+            model_path, config=model_config, torch_dtype=torch_dtype, device_map="auto",
             attn_implementation="sdpa",
         )
     elif args.model_type.lower() == 'llama':
         model = LlamaForCausalLM.from_pretrained(
-            model_path, torch_dtype=torch.bfloat16, device_map="auto",
+            model_path, torch_dtype=torch_dtype, device_map="auto",
             attn_implementation="sdpa",
         )
 

@@ -34,12 +34,29 @@ bash scripts/run_breadcrumbs_long_math.sh
 bash scripts/run_lightthinker_medusa_long_math.sh
 ```
 
+Run the revised Task 2 and Task 3 together (Breadcrumbs `c=5`, Medusa
+`d=2`/two future-token heads), followed by the Reviewer H4W6 static-batch
+matrix:
+
+```bash
+bash scripts/run_breadcrumbs_c5_medusa_d2_long_math.sh
+```
+
+The appended batch task measures Vanilla AR, MemoSight AR, and MemoSight SD at
+batch 4/16/64 with three repeats on a fixed seed-42 GSM8K performance subset.
+It records exact output IDs, aggregate throughput, accuracy, completion times,
+allocated/reserved memory, valid/physical KV occupancy, and SD acceptance.
+Batch-64 OOM triggers a complete batch-32 comparison; batch-16 OOM similarly
+triggers batch 8. Set `BATCH_SAMPLE_COUNT=0` for full GSM8K, or run only the
+batch task with `bash scripts/run_h4w6_batch_experiments.sh`.
+
 Task 1 trains the full Qwen3-8B model with MemoSight's foresight/register MTP
 objective, without compression or EPL. Task 2 distills a Breadcrumbs student
 from the frozen trained Vanilla checkpoint; this intentionally replaces the
-paper's RL-teacher stage. Task 3 freezes the trained LightThinker checkpoint,
-trains only four Medusa-1 residual heads, and uses the official 63-node sparse
-tree for lossless greedy verification at inference.
+paper's RL-teacher stage and uses a compression interval of five. Task 3
+freezes the trained LightThinker checkpoint, trains only two Medusa-1 residual
+heads to match MemoSight's `d=2`, and truncates the official 63-node sparse
+tree to depth two for lossless greedy verification at inference.
 
 Existing checkpoints are resumed automatically. To skip training and only
 evaluate an existing artifact, set the corresponding switch and path, for

@@ -128,7 +128,7 @@ print_help() {
   --lazy_window_size        Observation/eviction interval W (default 363)
   --lazy_alpha              Recurring-attention threshold (default 0.0001)
   --breadcrumbs             Enable learned Breadcrumbs compression (default false)
-  --breadcrumbs_compression_ratio  Beacon interval c (default 16)
+  --breadcrumbs_compression_ratio  Beacon interval c (default 5)
   --breadcrumbs_beacon_token       Learned beacon token (default <|breadcrumb|>)
   --medusa                  Enable LightThinker Medusa-1 decoding (default false)
   --medusa_head_path        Trained Medusa head checkpoint directory
@@ -551,7 +551,7 @@ LAZY_BUDGET=4915
 LAZY_WINDOW_SIZE=363
 LAZY_ALPHA="0.0001"
 BREADCRUMBS="false"
-BREADCRUMBS_COMPRESSION_RATIO=16
+BREADCRUMBS_COMPRESSION_RATIO=5
 BREADCRUMBS_BEACON_TOKEN="<|breadcrumb|>"
 MEDUSA="false"
 MEDUSA_HEAD_PATH=""

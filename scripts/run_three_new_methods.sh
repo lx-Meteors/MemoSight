@@ -20,8 +20,8 @@ TRAIN_TASK_2="${TRAIN_TASK_2:-true}"
 TRAIN_TASK_3="${TRAIN_TASK_3:-true}"
 
 FORESIGHT_EXP_TAG="${FORESIGHT_EXP_TAG:-qwen3_8b_foresight_mtp_only}"
-BREADCRUMBS_EXP_TAG="${BREADCRUMBS_EXP_TAG:-qwen3_8b_breadcrumbs}"
-MEDUSA_EXP_TAG="${MEDUSA_EXP_TAG:-qwen3_8b_lightthinker_medusa}"
+BREADCRUMBS_EXP_TAG="${BREADCRUMBS_EXP_TAG:-qwen3_8b_breadcrumbs_c5}"
+MEDUSA_EXP_TAG="${MEDUSA_EXP_TAG:-qwen3_8b_lightthinker_medusa_d2}"
 FORESIGHT_CKPT_PATH="${FORESIGHT_CKPT_PATH:-}"
 BREADCRUMBS_CKPT_PATH="${BREADCRUMBS_CKPT_PATH:-}"
 MEDUSA_HEAD_PATH="${MEDUSA_HEAD_PATH:-}"
@@ -41,8 +41,8 @@ SEED="${SEED:-42}"
 FORESIGHT_LR="${FORESIGHT_LR:-2e-5}"
 BREADCRUMBS_LR="${BREADCRUMBS_LR:-2e-5}"
 MEDUSA_LR="${MEDUSA_LR:-1e-3}"
-BREADCRUMBS_COMPRESSION_RATIO="${BREADCRUMBS_COMPRESSION_RATIO:-16}"
-MEDUSA_NUM_HEADS="${MEDUSA_NUM_HEADS:-4}"
+BREADCRUMBS_COMPRESSION_RATIO="${BREADCRUMBS_COMPRESSION_RATIO:-5}"
+MEDUSA_NUM_HEADS="${MEDUSA_NUM_HEADS:-2}"
 MEDUSA_NUM_LAYERS="${MEDUSA_NUM_LAYERS:-1}"
 REPETITION_PENALTY="${REPETITION_PENALTY:-1.1}"
 DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-${PROJECT_ROOT}/configs/ds_z3_offload_config.json}"
@@ -118,6 +118,40 @@ validate_medusa_checkpoint() {
     require_file "${path}/medusa_config.json"
     [[ -f "${path}/model.safetensors" || -f "${path}/pytorch_model.bin" ]] \
         || die "No Medusa head weights found in ${path}"
+    python - "${path}/medusa_config.json" "${MEDUSA_NUM_HEADS}" "${MEDUSA_NUM_LAYERS}" <<'PY'
+import json
+import sys
+
+config_path, expected_heads, expected_layers = sys.argv[1:]
+with open(config_path, encoding="utf-8") as handle:
+    config = json.load(handle)
+actual_heads = int(config.get("num_heads", -1))
+actual_layers = int(config.get("num_layers", -1))
+if actual_heads != int(expected_heads) or actual_layers != int(expected_layers):
+    raise SystemExit(
+        "Medusa checkpoint/config mismatch: "
+        f"expected heads={expected_heads}, layers={expected_layers}; "
+        f"got heads={actual_heads}, layers={actual_layers} ({config_path})"
+    )
+PY
+}
+
+validate_breadcrumbs_checkpoint() {
+    local path="$1"
+    python - "${path}/config.json" "${BREADCRUMBS_COMPRESSION_RATIO}" <<'PY'
+import json
+import sys
+
+config_path, expected_ratio = sys.argv[1:]
+with open(config_path, encoding="utf-8") as handle:
+    config = json.load(handle)
+actual_ratio = int(config.get("breadcrumbs_compression_ratio", -1))
+if actual_ratio != int(expected_ratio):
+    raise SystemExit(
+        "Breadcrumbs checkpoint/config mismatch: "
+        f"expected c={expected_ratio}; got c={actual_ratio} ({config_path})"
+    )
+PY
 }
 
 run_inference() {
@@ -181,7 +215,7 @@ train_breadcrumbs() {
     local teacher_path="$1"
     local output_dir="${OUTPUT_BASE_DIR}/${BREADCRUMBS_EXP_TAG}/train"
     mkdir -p "${output_dir}"
-    echo "[TRAIN] Task 2: Breadcrumbs student; frozen Vanilla teacher=${teacher_path}"
+    echo "[TRAIN] Task 2: Breadcrumbs c=${BREADCRUMBS_COMPRESSION_RATIO}; frozen Vanilla teacher=${teacher_path}"
     deepspeed --master_port=54222 --include "localhost:${TRAIN_GPUS}" \
         "${PROJECT_ROOT}/LightThinker/train_breadcrumbs.py" \
         --teacher_model_path "${teacher_path}" \
@@ -204,7 +238,7 @@ train_medusa() {
     local lightthinker_path="$1"
     local output_dir="${OUTPUT_BASE_DIR}/${MEDUSA_EXP_TAG}/train"
     mkdir -p "${output_dir}"
-    echo "[TRAIN] Task 3: Medusa heads only; frozen LightThinker=${lightthinker_path}"
+    echo "[TRAIN] Task 3: Medusa d=${MEDUSA_NUM_HEADS} heads only; frozen LightThinker=${lightthinker_path}"
     deepspeed --master_port=54232 --include "localhost:${TRAIN_GPUS}" \
         "${PROJECT_ROOT}/LightThinker/train_medusa.py" \
         --base_model_path "${lightthinker_path}" \
@@ -234,6 +268,14 @@ require_file "${TRAIN_DATA_PATH}"
 require_file "${DEEPSPEED_CONFIG}"
 require_file "${PROJECT_ROOT}/data/eval/aime_2026.jsonl"
 require_file "${PROJECT_ROOT}/data/eval/hmmt_feb_2025.jsonl"
+[[ "${BREADCRUMBS_COMPRESSION_RATIO}" =~ ^[0-9]+$ ]] \
+    || die "BREADCRUMBS_COMPRESSION_RATIO must be an integer >= 2"
+(( BREADCRUMBS_COMPRESSION_RATIO >= 2 )) \
+    || die "BREADCRUMBS_COMPRESSION_RATIO must be an integer >= 2"
+[[ "${MEDUSA_NUM_HEADS}" =~ ^[1-9][0-9]*$ ]] \
+    || die "MEDUSA_NUM_HEADS must be a positive integer"
+[[ "${MEDUSA_NUM_LAYERS}" =~ ^[1-9][0-9]*$ ]] \
+    || die "MEDUSA_NUM_LAYERS must be a positive integer"
 command -v python >/dev/null || die "python is unavailable"
 command -v deepspeed >/dev/null || die "deepspeed is unavailable; activate the memosight environment"
 
@@ -244,6 +286,7 @@ python -c 'import torch; assert torch.cuda.is_available(); print(f"[PREFLIGHT] t
 echo "================================================================"
 echo "Three-method rebuttal workflow"
 echo "task1=${RUN_TASK_1}/${TRAIN_TASK_1}, task2=${RUN_TASK_2}/${TRAIN_TASK_2}, task3=${RUN_TASK_3}/${TRAIN_TASK_3}"
+echo "task2_breadcrumbs_ratio=${BREADCRUMBS_COMPRESSION_RATIO}; task3_medusa_heads=${MEDUSA_NUM_HEADS}"
 echo "train_gpus=${TRAIN_GPUS}; eval_gpus=${TARGET_GPUS}; workers_per_gpu=${PROCESS_PER_GPU}"
 echo "datasets=${EVAL_DATASETS}; output_limit=${MAX_NEW_TOKENS}"
 echo "log=${RUN_LOG}"
@@ -263,6 +306,7 @@ if [[ "${RUN_TASK_2,,}" == "true" ]]; then
     [[ "${TRAIN_TASK_2,,}" == "false" ]] || train_breadcrumbs "${VANILLA_CKPT}"
     BREADCRUMBS_CKPT="$(latest_checkpoint "${BREADCRUMBS_CKPT_PATH}" "${OUTPUT_BASE_DIR}/${BREADCRUMBS_EXP_TAG}/train")"
     validate_model_checkpoint "${BREADCRUMBS_CKPT}"
+    validate_breadcrumbs_checkpoint "${BREADCRUMBS_CKPT}"
     run_inference "Breadcrumbs (Vanilla teacher distillation)" "${BREADCRUMBS_EXP_TAG}" \
         "${BREADCRUMBS_CKPT}" "${BREADCRUMBS_CKPT}" "${BASE_CONFIG}" true false normal \
         --breadcrumbs true \

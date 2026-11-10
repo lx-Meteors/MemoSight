@@ -40,7 +40,7 @@ class MedusaResidualBlock(nn.Module):
 class MedusaHeads(nn.Module):
     """Future-token heads that share the frozen backbone LM projection."""
 
-    def __init__(self, hidden_size: int, num_heads: int = 4, num_layers: int = 1):
+    def __init__(self, hidden_size: int, num_heads: int = 2, num_layers: int = 1):
         super().__init__()
         if num_heads <= 0 or num_layers <= 0:
             raise ValueError("Medusa num_heads and num_layers must be positive")
