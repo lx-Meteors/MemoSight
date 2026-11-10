@@ -123,6 +123,10 @@ print_help() {
   --rkv_retain_ratio        相似邻居保留比例（默认 0.2）
   --rkv_retain_direction    相似邻居保留方向（默认 last）
   --rkv_similarity_threshold 余弦相似度阈值（默认 0.5）
+  --lazy_eviction           Enable training-free LazyEviction on Vanilla (default false)
+  --lazy_budget             Retained KV-token budget (default 4915)
+  --lazy_window_size        Observation/eviction interval W (default 363)
+  --lazy_alpha              Recurring-attention threshold (default 0.0001)
 
 兼容参数:
   --model_path               兼容旧参数：按 stage 映射到 train/infer；stage=all 时仅用于训练
@@ -205,6 +209,10 @@ save_param_snapshot() {
         echo "rkv_retain_ratio=${RKV_RETAIN_RATIO}"
         echo "rkv_retain_direction=${RKV_RETAIN_DIRECTION}"
         echo "rkv_similarity_threshold=${RKV_SIMILARITY_THRESHOLD}"
+        echo "lazy_eviction=${LAZY_EVICTION}"
+        echo "lazy_budget=${LAZY_BUDGET}"
+        echo "lazy_window_size=${LAZY_WINDOW_SIZE}"
+        echo "lazy_alpha=${LAZY_ALPHA}"
         echo "seed=${SEED}"
     } > "${snapshot}"
     link_latest "${snapshot}" "run_latest.txt"
@@ -369,6 +377,10 @@ run_infer() {
                 --rkv_retain_ratio "${RKV_RETAIN_RATIO}" \
                 --rkv_retain_direction "${RKV_RETAIN_DIRECTION}" \
                 --rkv_similarity_threshold "${RKV_SIMILARITY_THRESHOLD}" \
+                --lazy_eviction "${LAZY_EVICTION}" \
+                --lazy_budget "${LAZY_BUDGET}" \
+                --lazy_window_size "${LAZY_WINDOW_SIZE}" \
+                --lazy_alpha "${LAZY_ALPHA}" \
                 --datasets "${ds_arr[@]}" \
                 > "${output_tag}/inference_log/${infer_mode_dir}/${real_index}_${model_short_tag}_${resolved_ckpt}.txt" 2>&1 &
             pids+=("$!")
@@ -520,6 +532,10 @@ RKV_MIX_LAMBDA="0.1"
 RKV_RETAIN_RATIO="0.2"
 RKV_RETAIN_DIRECTION="last"
 RKV_SIMILARITY_THRESHOLD="0.5"
+LAZY_EVICTION="false"
+LAZY_BUDGET=4915
+LAZY_WINDOW_SIZE=363
+LAZY_ALPHA="0.0001"
 
 # 评估参数
 EVAL_METHOD="normal"
@@ -596,6 +612,10 @@ while [[ $# -gt 0 ]]; do
         --rkv_retain_ratio) RKV_RETAIN_RATIO="${2:-}"; shift 2 ;;
         --rkv_retain_direction) RKV_RETAIN_DIRECTION="${2:-}"; shift 2 ;;
         --rkv_similarity_threshold) RKV_SIMILARITY_THRESHOLD="${2:-}"; shift 2 ;;
+        --lazy_eviction) LAZY_EVICTION="${2:-}"; shift 2 ;;
+        --lazy_budget) LAZY_BUDGET="${2:-}"; shift 2 ;;
+        --lazy_window_size) LAZY_WINDOW_SIZE="${2:-}"; shift 2 ;;
+        --lazy_alpha) LAZY_ALPHA="${2:-}"; shift 2 ;;
 
         # 评估参数
         --eval_method) EVAL_METHOD="${2:-}"; shift 2 ;;

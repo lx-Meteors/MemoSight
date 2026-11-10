@@ -17,6 +17,7 @@ LIGHTTHINKER_EXP_TAG="${LIGHTTHINKER_EXP_TAG:-qwen3_8b_lightthinker}"
 MEMOSIGHT_EXP_TAG="${MEMOSIGHT_EXP_TAG:-qwen3_8b_memosight}"
 VANILLA_EXP_TAG="${VANILLA_EXP_TAG:-qwen3_8b_vanilla}"
 RKV_EXP_TAG="${RKV_EXP_TAG:-qwen3_8b_vanilla_rkv}"
+LAZY_EVICTION_EXP_TAG="${LAZY_EVICTION_EXP_TAG:-qwen3_8b_vanilla_lazy_eviction}"
 
 # Fixed rebuttal checkpoints. Override either path with an environment variable
 # if a later checkpoint should be evaluated.
@@ -39,6 +40,7 @@ WARMUP_STEPS="${WARMUP_STEPS:-0}"
 SEED="${SEED:-42}"
 DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-configs/ds_z3_offload_config.json}"
 TRAIN_VANILLA="${TRAIN_VANILLA:-true}"
+RUN_VANILLA="${RUN_VANILLA:-true}"
 RUN_LIGHTTHINKER="${RUN_LIGHTTHINKER:-true}"
 RUN_MEMOSIGHT="${RUN_MEMOSIGHT:-true}"
 
@@ -64,6 +66,13 @@ RKV_MIX_LAMBDA="${RKV_MIX_LAMBDA:-0.1}"
 RKV_RETAIN_RATIO="${RKV_RETAIN_RATIO:-0.2}"
 RKV_RETAIN_DIRECTION="${RKV_RETAIN_DIRECTION:-last}"
 RKV_SIMILARITY_THRESHOLD="${RKV_SIMILARITY_THRESHOLD:-0.5}"
+
+# LazyEviction AIME defaults: Qwen alpha from the paper/repository, AIME
+# observation window from the official launcher, and 30% of its 16K AIME cap.
+RUN_LAZY_EVICTION="${RUN_LAZY_EVICTION:-false}"
+LAZY_BUDGET="${LAZY_BUDGET:-4915}"
+LAZY_WINDOW_SIZE="${LAZY_WINDOW_SIZE:-363}"
+LAZY_ALPHA="${LAZY_ALPHA:-0.0001}"
 
 # Optional: point this to the server conda environment's bin directory. If it
 # is empty, the already activated shell environment is used.
@@ -205,6 +214,7 @@ run_inference() {
     local vanilla_inference="$7"
     local eval_method="$8"
     local rkv="$9"
+    local lazy_eviction="${10}"
 
     echo
     echo "================================================================"
@@ -215,6 +225,7 @@ run_inference() {
     echo "use_epl=${use_epl}, spec_decode=${spec_decode}"
     echo "vanilla_inference=${vanilla_inference}"
     echo "rkv=${rkv}"
+    echo "lazy_eviction=${lazy_eviction}"
     echo "eval_method=${eval_method}"
     echo "================================================================"
 
@@ -239,6 +250,10 @@ run_inference() {
         --rkv_retain_ratio "${RKV_RETAIN_RATIO}" \
         --rkv_retain_direction "${RKV_RETAIN_DIRECTION}" \
         --rkv_similarity_threshold "${RKV_SIMILARITY_THRESHOLD}" \
+        --lazy_eviction "${lazy_eviction}" \
+        --lazy_budget "${LAZY_BUDGET}" \
+        --lazy_window_size "${LAZY_WINDOW_SIZE}" \
+        --lazy_alpha "${LAZY_ALPHA}" \
         --eval_method "${eval_method}" \
         --datasets "${EVAL_DATASETS}" \
         --target_gpus "${TARGET_GPUS}" \
@@ -286,7 +301,9 @@ require_file "${MEMOSIGHT_CONFIG}"
 require_file "${VANILLA_CONFIG}"
 require_dir "${TOKENIZER_PATH}"
 require_bool "TRAIN_VANILLA" "${TRAIN_VANILLA}"
+require_bool "RUN_VANILLA" "${RUN_VANILLA}"
 require_bool "RUN_RKV" "${RUN_RKV}"
+require_bool "RUN_LAZY_EVICTION" "${RUN_LAZY_EVICTION}"
 require_bool "RUN_LIGHTTHINKER" "${RUN_LIGHTTHINKER}"
 require_bool "RUN_MEMOSIGHT" "${RUN_MEMOSIGHT}"
 
@@ -319,6 +336,13 @@ if [[ "${RUN_RKV,,}" == "true" ]]; then
         "${RKV_BUDGET}" "${RKV_BUFFER_SIZE}" "${RKV_WINDOW_SIZE}" "${RKV_KERNEL_SIZE}" \
         "${RKV_MIX_LAMBDA}" "${RKV_RETAIN_RATIO}" "${RKV_SIMILARITY_THRESHOLD}" \
         || die "Invalid R-KV configuration"
+fi
+
+if [[ "${RUN_LAZY_EVICTION,,}" == "true" ]]; then
+    python -c \
+        'import sys; b,w=int(sys.argv[1]),int(sys.argv[2]); a=float(sys.argv[3]); assert b>w>0 and 0<=a<=1' \
+        "${LAZY_BUDGET}" "${LAZY_WINDOW_SIZE}" "${LAZY_ALPHA}" \
+        || die "Invalid LazyEviction configuration"
 fi
 
 python -c 'import torch; assert torch.cuda.is_available(); print(f"[PREFLIGHT] torch={torch.__version__}, cuda={torch.version.cuda}, visible_gpus={torch.cuda.device_count()}")' \
@@ -391,6 +415,7 @@ echo "base_model=${BASE_MODEL_PATH}"
 echo "lightthinker_checkpoint=${LIGHTTHINKER_CKPT:-SKIPPED}"
 echo "memosight_checkpoint=${MEMOSIGHT_CKPT:-SKIPPED}"
 echo "train_vanilla=${TRAIN_VANILLA}"
+echo "run_vanilla=${RUN_VANILLA}"
 echo "vanilla_resume_checkpoint=${VANILLA_RESUME_CHECKPOINT:-auto/latest}"
 echo "run_lightthinker=${RUN_LIGHTTHINKER}"
 echo "run_memosight=${RUN_MEMOSIGHT}"
@@ -399,14 +424,16 @@ echo "target_gpus=${TARGET_GPUS}"
 echo "process_per_gpu=${PROCESS_PER_GPU}"
 echo "run_rkv=${RUN_RKV}"
 echo "rkv_budget=${RKV_BUDGET}, rkv_buffer_size=${RKV_BUFFER_SIZE}"
+echo "run_lazy_eviction=${RUN_LAZY_EVICTION}"
+echo "lazy_budget=${LAZY_BUDGET}, lazy_window_size=${LAZY_WINDOW_SIZE}, lazy_alpha=${LAZY_ALPHA}"
 echo "log=${RUN_LOG}"
 echo "================================================================"
 
 if [[ "${RUN_LIGHTTHINKER,,}" == "true" ]]; then
-    run_inference "LightThinker" "${LIGHTTHINKER_EXP_TAG}" "${LIGHTTHINKER_CKPT}" "${LIGHTTHINKER_CONFIG}" false false false anchor-thought false
+    run_inference "LightThinker" "${LIGHTTHINKER_EXP_TAG}" "${LIGHTTHINKER_CKPT}" "${LIGHTTHINKER_CONFIG}" false false false anchor-thought false false
 fi
 if [[ "${RUN_MEMOSIGHT,,}" == "true" ]]; then
-    run_inference "MemoSight" "${MEMOSIGHT_EXP_TAG}" "${MEMOSIGHT_CKPT}" "${MEMOSIGHT_CONFIG}" true true false anchor-thought false
+    run_inference "MemoSight" "${MEMOSIGHT_EXP_TAG}" "${MEMOSIGHT_CKPT}" "${MEMOSIGHT_CONFIG}" true true false anchor-thought false false
 fi
 
 if [[ "${TRAIN_VANILLA,,}" == "true" ]]; then
@@ -415,10 +442,16 @@ if [[ "${TRAIN_VANILLA,,}" == "true" ]]; then
     validate_checkpoint "${VANILLA_CKPT}" "Vanilla"
 fi
 
-run_inference "Vanilla" "${VANILLA_EXP_TAG}" "${VANILLA_CKPT}" "${VANILLA_CONFIG}" false false true normal false
+if [[ "${RUN_VANILLA,,}" == "true" ]]; then
+    run_inference "Vanilla" "${VANILLA_EXP_TAG}" "${VANILLA_CKPT}" "${VANILLA_CONFIG}" false false true normal false false
+fi
 
 if [[ "${RUN_RKV,,}" == "true" ]]; then
-    run_inference "R-KV (Vanilla checkpoint)" "${RKV_EXP_TAG}" "${VANILLA_CKPT}" "${VANILLA_CONFIG}" false false true normal true
+    run_inference "R-KV (Vanilla checkpoint)" "${RKV_EXP_TAG}" "${VANILLA_CKPT}" "${VANILLA_CONFIG}" false false true normal true false
+fi
+
+if [[ "${RUN_LAZY_EVICTION,,}" == "true" ]]; then
+    run_inference "LazyEviction (Vanilla checkpoint)" "${LAZY_EVICTION_EXP_TAG}" "${VANILLA_CKPT}" "${VANILLA_CONFIG}" false false true normal false true
 fi
 
 echo
@@ -431,9 +464,14 @@ fi
 if [[ "${RUN_MEMOSIGHT,,}" == "true" ]]; then
     echo "MemoSight results:    ${OUTPUT_BASE_DIR}/${MEMOSIGHT_EXP_TAG}"
 fi
-echo "Vanilla results:      ${OUTPUT_BASE_DIR}/${VANILLA_EXP_TAG}"
+if [[ "${RUN_VANILLA,,}" == "true" ]]; then
+    echo "Vanilla results:      ${OUTPUT_BASE_DIR}/${VANILLA_EXP_TAG}"
+fi
 if [[ "${RUN_RKV,,}" == "true" ]]; then
     echo "R-KV results:         ${OUTPUT_BASE_DIR}/${RKV_EXP_TAG}"
+fi
+if [[ "${RUN_LAZY_EVICTION,,}" == "true" ]]; then
+    echo "LazyEviction results: ${OUTPUT_BASE_DIR}/${LAZY_EVICTION_EXP_TAG}"
 fi
 echo "Log:                  ${RUN_LOG}"
 echo "================================================================"

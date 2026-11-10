@@ -17,6 +17,7 @@ from tokenizer import Tokenizer
 from model_llama import LlamaForCausalLM
 from model_qwen import Qwen3ForCausalLM
 from rkv import RKVCacheCompressor, RKVConfig
+from lazy_eviction import LazyEvictionCompressor, LazyEvictionConfig
 from dataset_reader import (
     AIME2026Reader,
     BBHReader,
@@ -1704,23 +1705,24 @@ def _sentence_level_generate(
 # 2.多token和单token存在计算差异计算 
 # 导致某些位置（例如 to 和 for）logit差异过小而选择了不同的token
 @torch.no_grad()
-def _rkv_generate(
+def _cache_eviction_generate(
     model: Qwen3ForCausalLM,
     tokenizer: Tokenizer,
     max_new_tokens: int,
     kv_utils: KVUtils,
     token_utils: TokenUtils,
     predicted_token_id: int,
-    compressor: RKVCacheCompressor,
+    compressor: Union[RKVCacheCompressor, LazyEvictionCompressor],
     repetition_penalty: float = 1.0,
 ) -> Tuple[str, str]:
-    """Vanilla autoregressive decoding with periodic R-KV cache eviction."""
+    """Vanilla autoregressive decoding with periodic physical KV eviction."""
     new_token_counters = 0
     eos_token_id = tokenizer.eos_token_id
 
-    # The prefill queries seed R-KV's alpha-token observation window. Prompt
-    # KVs remain untouched until the first decode buffer is complete.
-    compressor.observe_queries(model)
+    # R-KV seeds its query observation window from prefill. LazyEviction starts
+    # recurrence tracking on the first decode step, as in the official code.
+    if isinstance(compressor, RKVCacheCompressor):
+        compressor.observe_queries(model)
     compressor.peak_cache_tokens = max(
         compressor.peak_cache_tokens, kv_utils.get_cache().get_seq_length()
     )
@@ -2183,14 +2185,20 @@ def generate(
     mtp_stats:"MTPStats"=None,
     rkv_config:RKVConfig=None,
     rkv_stats:Dict=None,
+    lazy_eviction_config:LazyEvictionConfig=None,
+    lazy_eviction_stats:Dict=None,
 ) -> Tuple[str,str]:
 
     assert update_attention_method in ['global', 'local'], update_attention_method
     kv_utils = KVUtils()
     rkv_compressor = None
+    lazy_eviction_compressor = None
     if rkv_config is not None:
         rkv_compressor = RKVCacheCompressor(rkv_config)
         rkv_compressor.enable_query_capture(model)
+    if lazy_eviction_config is not None:
+        lazy_eviction_compressor = LazyEvictionCompressor(lazy_eviction_config)
+        lazy_eviction_compressor.enable_query_capture(model)
 
     # 1. prefill
     predicted_token_id, last_hidden_state = prefill(
@@ -2212,7 +2220,7 @@ def generate(
 
     # 2. auto-regressive generation
     if rkv_compressor is not None:
-        prompt, output = _rkv_generate(
+        prompt, output = _cache_eviction_generate(
             model=model,
             tokenizer=tokenizer,
             max_new_tokens=max_new_tokens,
@@ -2224,6 +2232,19 @@ def generate(
         )
         if rkv_stats is not None:
             rkv_stats.update(rkv_compressor.summary())
+    elif lazy_eviction_compressor is not None:
+        prompt, output = _cache_eviction_generate(
+            model=model,
+            tokenizer=tokenizer,
+            max_new_tokens=max_new_tokens,
+            kv_utils=kv_utils,
+            token_utils=token_utils,
+            predicted_token_id=predicted_token_id,
+            compressor=lazy_eviction_compressor,
+            repetition_penalty=repetition_penalty,
+        )
+        if lazy_eviction_stats is not None:
+            lazy_eviction_stats.update(lazy_eviction_compressor.summary())
     elif comp_config.output_comp_level == 'token':
         prompt, output = _token_level_generate(
             model=model,
@@ -2329,6 +2350,15 @@ def get_parser():
         default='last',
     )
     parser.add_argument('--rkv_similarity_threshold', type=float, default=0.5)
+    parser.add_argument(
+        '--lazy_eviction',
+        type=str2bool,
+        default=False,
+        help='Enable training-free LazyEviction on the Vanilla Qwen3 checkpoint.',
+    )
+    parser.add_argument('--lazy_budget', type=int, default=4915)
+    parser.add_argument('--lazy_window_size', type=int, default=363)
+    parser.add_argument('--lazy_alpha', type=float, default=0.0001)
 
     parser.add_argument('--bos_token', type=str)
     parser.add_argument('--eos_token', type=str)
@@ -2452,6 +2482,7 @@ def eval_dataset(
     mtp_draft_len:int=None,
     profile_breakdown:bool=False,
     rkv_config:RKVConfig=None,
+    lazy_eviction_config:LazyEvictionConfig=None,
     run_signature:Dict=None,
 ):
 
@@ -2517,7 +2548,18 @@ def eval_dataset(
                     and item.get('rkv_stats', {}).get('window_size') == rkv_config.window_size
                     for item in data_copy_list
                 )
-            if valid_prefix and valid_length and valid_cap and valid_signature and valid_rkv:
+            valid_lazy = True
+            if lazy_eviction_config is not None:
+                valid_lazy = all(
+                    item.get('lazy_eviction_stats', {}).get('budget') == lazy_eviction_config.budget
+                    and item.get('lazy_eviction_stats', {}).get('window_size') == lazy_eviction_config.window_size
+                    and item.get('lazy_eviction_stats', {}).get('alpha') == lazy_eviction_config.alpha
+                    for item in data_copy_list
+                )
+            if (
+                valid_prefix and valid_length and valid_cap and valid_signature
+                and valid_rkv and valid_lazy
+            ):
                 start = _id_list[-1] + 1
             else:
                 print(
@@ -2578,6 +2620,7 @@ def eval_dataset(
 
             sample_stats = MTPStats(profile=profile_breakdown) if spec_decode else None
             sample_rkv_stats = {} if rkv_config is not None else None
+            sample_lazy_eviction_stats = {} if lazy_eviction_config is not None else None
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
@@ -2608,6 +2651,8 @@ def eval_dataset(
                 mtp_stats=sample_stats,
                 rkv_config=rkv_config,
                 rkv_stats=sample_rkv_stats,
+                lazy_eviction_config=lazy_eviction_config,
+                lazy_eviction_stats=sample_lazy_eviction_stats,
             )
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -2655,6 +2700,9 @@ def eval_dataset(
             if sample_rkv_stats is not None:
                 record["rkv_stats"] = sample_rkv_stats
                 record["peak_kv_tokens"] = sample_rkv_stats["peak_kv_tokens"]
+            if sample_lazy_eviction_stats is not None:
+                record["lazy_eviction_stats"] = sample_lazy_eviction_stats
+                record["peak_kv_tokens"] = sample_lazy_eviction_stats["peak_kv_tokens"]
             writer.write(record)
             pbar.set_description(f"model:`{model_answer}`; gt:`{gt_answer}`; correct:{acc_state}; acc: {acc}/{total}={round(acc/total, 5)}; input: {input_len}; output: {output_len}; `{comp_pattern}`; max_token: {token_utils.max_token}")
             token_utils.reset()
@@ -2677,6 +2725,9 @@ def main():
     print(args)
 
     rkv_config = None
+    lazy_eviction_config = None
+    if args.rkv and args.lazy_eviction:
+        raise ValueError('R-KV and LazyEviction cannot be enabled in the same run')
     if args.rkv:
         if not args.vanilla:
             raise ValueError('R-KV must be combined with --vanilla true')
@@ -2701,6 +2752,25 @@ def main():
         )
         rkv_config.validate()
         print(f'R-KV config: {rkv_config}')
+    if args.lazy_eviction:
+        if not args.vanilla:
+            raise ValueError('LazyEviction must be combined with --vanilla true')
+        if args.model_type.lower() != 'qwen':
+            raise ValueError('This local LazyEviction adapter currently supports Qwen3 only')
+        if args.use_EPL or args.spec_decode or args.prefill_compress or args.compress_prompt:
+            raise ValueError(
+                'LazyEviction is a Vanilla decode-time method: disable EPL, speculative '
+                'decoding, and prompt/prefill compression'
+            )
+        if args.rolling_rope:
+            raise ValueError('LazyEviction requires the original logical RoPE timeline')
+        lazy_eviction_config = LazyEvictionConfig(
+            budget=args.lazy_budget,
+            window_size=args.lazy_window_size,
+            alpha=args.lazy_alpha,
+        )
+        lazy_eviction_config.validate()
+        print(f'LazyEviction config: {lazy_eviction_config}')
 
     comp_config = Config.from_file(args.compress_config)
     with open(args.compress_config, 'rb') as config_file:
@@ -2738,6 +2808,10 @@ def main():
         rkv_retain_ratio=args.rkv_retain_ratio if args.rkv else None,
         rkv_retain_direction=args.rkv_retain_direction if args.rkv else None,
         rkv_similarity_threshold=args.rkv_similarity_threshold if args.rkv else None,
+        lazy_eviction=args.lazy_eviction,
+        lazy_budget=args.lazy_budget if args.lazy_eviction else None,
+        lazy_window_size=args.lazy_window_size if args.lazy_eviction else None,
+        lazy_alpha=args.lazy_alpha if args.lazy_eviction else None,
     )
     attention_config = dict(
         diagonal=args.diagonal,
@@ -2799,6 +2873,7 @@ def main():
             mtp_draft_len=args.mtp_draft_len,
             profile_breakdown=args.profile_breakdown,
             rkv_config=rkv_config,
+            lazy_eviction_config=lazy_eviction_config,
             run_signature=run_signature,
         )
 
